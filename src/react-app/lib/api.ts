@@ -6,18 +6,6 @@ import type {
 } from "@shared/types";
 import type { ValidationIssue } from "@shared/config-generator";
 
-const TOKEN_KEY = "rathole-admin-token";
-
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
-}
-export function setToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
-}
-
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -25,12 +13,11 @@ export class ApiError extends Error {
 }
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken();
   const res = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: {
       ...(init.body ? { "content-type": "application/json" } : {}),
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...init.headers,
     },
   });
@@ -43,11 +30,23 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  async checkSession(token: string): Promise<boolean> {
-    const res = await fetch("/api/session", {
-      headers: { authorization: `Bearer ${token}` },
+  async login(username: string, password: string): Promise<boolean> {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
     });
     return res.ok;
+  },
+
+  async checkSession(): Promise<boolean> {
+    const res = await fetch("/api/session", { credentials: "same-origin" });
+    return res.ok;
+  },
+
+  async logout(): Promise<void> {
+    await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
   },
 
   listInstances: () => req<{ instances: InstanceView[] }>("/api/instances"),

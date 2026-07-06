@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { api, clearToken, getToken } from "@/lib/api";
+import { api } from "@/lib/api";
 import { Login } from "@/pages/Login";
 import { Dashboard } from "@/pages/Dashboard";
 import { InstanceDetail } from "@/pages/InstanceDetail";
@@ -13,12 +13,10 @@ export default function App() {
   const [auth, setAuth] = useState<Auth>("checking");
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) {
-      setAuth("out");
-      return;
-    }
-    api.checkSession(token).then((ok) => setAuth(ok ? "in" : "out"));
+    localStorage.removeItem("rathole-admin-token");
+    api.checkSession()
+      .then((ok) => setAuth(ok ? "in" : "out"))
+      .catch(() => setAuth("out"));
   }, []);
 
   if (auth === "checking") {
@@ -64,9 +62,12 @@ function TopBar({ onLogout }: { onLogout: () => void }) {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => {
-            clearToken();
-            onLogout();
+          onClick={async () => {
+            try {
+              await api.logout();
+            } finally {
+              onLogout();
+            }
           }}
         >
           <LogOut className="h-4 w-4" />

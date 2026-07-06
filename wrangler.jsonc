@@ -24,10 +24,5 @@
       "tag": "v1",
       "new_sqlite_classes": ["RatholeHub"]
     }
-  ],
-  "vars": {
-    // Change this in production via `wrangler secret put ADMIN_TOKEN`.
-    // Left here only as a dev default.
-    "ADMIN_TOKEN": "change-me-admin-token"
-  }
+  ]
 }

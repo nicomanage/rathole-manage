@@ -5,7 +5,6 @@ import type {
   HubToBrowser,
   InstanceView,
 } from "@shared/types";
-import { getToken } from "@/lib/api";
 
 export interface LogLine {
   instanceId: string;
@@ -35,10 +34,8 @@ export function useHubSocket() {
   }, []);
 
   const connect = useCallback(() => {
-    const token = getToken();
-    if (!token) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/api/ws?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(`${proto}://${location.host}/api/ws`);
     wsRef.current = ws;
     setConn("connecting");
 

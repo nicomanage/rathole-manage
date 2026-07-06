@@ -25,7 +25,6 @@ import { generateServerToml, hashConfig } from "@shared/config-generator";
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
   ASSETS: Fetcher;
-  ADMIN_TOKEN: string;
 }
 
 const OFFLINE_AFTER_MS = 45_000;
@@ -112,8 +111,21 @@ export class RatholeHub extends DurableObject<Env> {
 
   // ---- WebSocket entrypoints ---------------------------------------------
 
+  /**
+   * WebSocket upgrade responses must travel through the Durable Object fetch
+   * handler so the client side of the pair reaches the original request.
+   */
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/ws") return this.acceptBrowser();
+    if (url.pathname === "/api/agent/ws") {
+      return this.acceptAgent(url.searchParams.get("instance") ?? "");
+    }
+    return new Response("not found", { status: 404 });
+  }
+
   /** Upgrade an agent connection. `role` tag = agent:<instanceId>. */
-  async acceptAgent(instanceId: string): Promise<Response> {
+  private acceptAgent(instanceId: string): Response {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server, [`agent:${instanceId}`]);
@@ -121,7 +133,7 @@ export class RatholeHub extends DurableObject<Env> {
   }
 
   /** Upgrade a browser dashboard connection. */
-  async acceptBrowser(): Promise<Response> {
+  private acceptBrowser(): Response {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server, ["browser"]);

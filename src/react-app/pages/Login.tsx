@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, setToken } from "@/lib/api";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,20 +8,22 @@ import { Waypoints } from "lucide-react";
 import { toast } from "sonner";
 
 export function Login({ onAuthed }: { onAuthed: () => void }) {
-  const [token, setTokenInput] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     try {
-      const ok = await api.checkSession(token.trim());
+      const ok = await api.login(username.trim(), password);
       if (!ok) {
-        toast.error("Invalid admin token");
+        toast.error("Invalid username or password");
         return;
       }
-      setToken(token.trim());
       onAuthed();
+    } catch {
+      toast.error("Unable to sign in");
     } finally {
       setBusy(false);
     }
@@ -35,22 +37,36 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
             <Waypoints className="h-6 w-6" />
           </span>
           <CardTitle className="text-xl">rathole-manage</CardTitle>
-          <CardDescription>Enter your admin token to manage rathole instances.</CardDescription>
+          <CardDescription>Sign in to manage rathole instances.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="token">Admin token</Label>
+              <Label htmlFor="username">Username</Label>
               <Input
-                id="token"
-                type="password"
+                id="username"
+                type="text"
                 autoFocus
-                placeholder="••••••••••••"
-                value={token}
-                onChange={(e) => setTokenInput(e.target.value)}
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
               />
             </div>
-            <Button type="submit" className="w-full" disabled={busy || !token.trim()}>
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={busy || !username.trim() || !password}
+            >
               {busy ? "Checking…" : "Sign in"}
             </Button>
           </form>

@@ -54,17 +54,19 @@ From the panel you can:
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # set ADMIN_TOKEN
+cp .dev.vars.example .dev.vars   # set username, password, and session secret
 npm run dev                      # Vite + Worker via @cloudflare/vite-plugin
 ```
 
-Open the printed URL and sign in with the `ADMIN_TOKEN`.
+Open the printed URL and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
 
 ## Deploy the panel
 
 ```bash
 npm run cf-typegen               # generate worker types (first time / after config changes)
-npx wrangler secret put ADMIN_TOKEN
+npx wrangler secret put ADMIN_USERNAME
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put SESSION_SECRET
 npm run deploy
 ```
 
@@ -105,11 +107,13 @@ generator (`src/shared/config-generator.ts`) turns this into standard rathole
 
 ## Security notes
 
-- The panel is gated by `ADMIN_TOKEN` (bearer token / query param on the WS).
+- The panel uses username/password login and an HMAC-signed, `HttpOnly`,
+  `SameSite=Strict`, `Secure` session cookie. Credentials are never placed in a
+  WebSocket URL or browser storage.
 - Each instance has its own random `agentToken`; agents authenticate with it and
   can only act on their own instance.
-- Set real secrets with `wrangler secret put` — the value in `wrangler.jsonc` is a
-  dev placeholder. Serve the panel over HTTPS so `wss` and tokens stay encrypted.
+- Set all production credentials with `wrangler secret put`. Serve the panel
+  over HTTPS so `wss`, credentials, and session cookies stay encrypted.
 
 ## Scripts
 
