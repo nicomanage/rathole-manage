@@ -1,9 +1,19 @@
 import type {
   AgentCommand,
+  CreateUserInput,
   GlobalSettings,
   InstanceView,
+  Role,
   UpdateInstanceInput,
+  UpdateUserInput,
+  UserView,
 } from "@shared/types";
+
+export interface SessionState {
+  authenticated: boolean;
+  username?: string;
+  role?: Role;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -47,16 +57,38 @@ export const api = {
     return res.ok;
   },
 
-  async checkSession(): Promise<boolean> {
+  async session(): Promise<SessionState> {
     const res = await fetch("/api/session", { credentials: "same-origin" });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { authenticated?: boolean };
-    return body.authenticated === true;
+    if (!res.ok) return { authenticated: false };
+    return (await res.json()) as SessionState;
   },
 
   async logout(): Promise<void> {
     await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
   },
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    req<{ ok: boolean }>("/api/account/password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+
+  // ---- user management (admin) ----
+  listUsers: () => req<{ users: UserView[] }>("/api/users"),
+
+  createUser: (input: CreateUserInput) =>
+    req<{ user: UserView }>("/api/users", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  updateUser: (id: string, input: UpdateUserInput) =>
+    req<{ user: UserView }>(`/api/users/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+
+  deleteUser: (id: string) => req<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
 
   getSettings: () => req<{ settings: GlobalSettings }>("/api/settings"),
 

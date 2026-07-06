@@ -20,8 +20,23 @@ import type {
   HubToBrowser,
   Instance,
   InstanceView,
+  User,
+  UserView,
 } from "@shared/types";
 import { generateServerToml, hashServerConfig } from "./server-config";
+
+/** Result of a user mutation that can fail validation. */
+export type UserMutation =
+  | { ok: true; user: UserView }
+  | { ok: false; status: number; error: string };
+
+function toUserView(user: User): UserView {
+  const { passwordHash, passwordSalt, passwordIterations, ...view } = user;
+  void passwordHash;
+  void passwordSalt;
+  void passwordIterations;
+  return view;
+}
 
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
@@ -42,17 +57,20 @@ function toView(inst: Instance): InstanceView {
 
 export class RatholeHub extends DurableObject<Env> {
   private instances = new Map<string, Instance>();
+  private users = new Map<string, User>();
   private settings: GlobalSettings = { ...DEFAULT_SETTINGS };
   private loaded = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      const [stored, settings] = await Promise.all([
+      const [stored, settings, users] = await Promise.all([
         ctx.storage.list<Instance>({ prefix: "instance:" }),
         ctx.storage.get<GlobalSettings>("settings:global"),
+        ctx.storage.list<User>({ prefix: "user:" }),
       ]);
       for (const inst of stored.values()) this.instances.set(inst.id, inst);
+      for (const user of users.values()) this.users.set(user.id, user);
       if (settings) {
         this.settings = {
           defaultBindAddr: settings.defaultBindAddr ?? DEFAULT_SETTINGS.defaultBindAddr,
@@ -109,6 +127,86 @@ export class RatholeHub extends DurableObject<Env> {
     this.settings = { ...settings };
     await this.ctx.storage.put("settings:global", this.settings);
     return { ...this.settings };
+  }
+
+  // ---- users --------------------------------------------------------------
+  // These run inside the single-threaded DO, so check-then-write is atomic.
+
+  async listUsers(): Promise<UserView[]> {
+    return [...this.users.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(toUserView);
+  }
+
+  async countUsers(): Promise<number> {
+    return this.users.size;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const wanted = username.trim().toLowerCase();
+    for (const user of this.users.values()) {
+      if (user.username.toLowerCase() === wanted) return user;
+    }
+    return undefined;
+  }
+
+  private async putUser(user: User) {
+    this.users.set(user.id, user);
+    await this.ctx.storage.put(`user:${user.id}`, user);
+  }
+
+  /** Seed the first admin (from env) only when there are no users yet. */
+  async bootstrapAdmin(user: User): Promise<boolean> {
+    if (this.users.size > 0) return false;
+    await this.putUser(user);
+    return true;
+  }
+
+  async createUser(user: User): Promise<UserMutation> {
+    if (await this.getUserByUsername(user.username)) {
+      return { ok: false, status: 409, error: "username already exists" };
+    }
+    await this.putUser(user);
+    return { ok: true, user: toUserView(user) };
+  }
+
+  async updateUser(
+    id: string,
+    patch: { role?: User["role"]; password?: import("./passwords").PasswordFields },
+  ): Promise<UserMutation> {
+    const user = this.users.get(id);
+    if (!user) return { ok: false, status: 404, error: "user not found" };
+
+    // Guard against demoting the last admin.
+    if (patch.role && patch.role !== "admin" && user.role === "admin") {
+      const admins = [...this.users.values()].filter((u) => u.role === "admin");
+      if (admins.length <= 1) {
+        return { ok: false, status: 400, error: "cannot demote the last admin" };
+      }
+    }
+
+    const next: User = {
+      ...user,
+      role: patch.role ?? user.role,
+      ...(patch.password ?? {}),
+      updatedAt: Date.now(),
+    };
+    await this.putUser(next);
+    return { ok: true, user: toUserView(next) };
+  }
+
+  async deleteUser(id: string): Promise<UserMutation> {
+    const user = this.users.get(id);
+    if (!user) return { ok: false, status: 404, error: "user not found" };
+    if (user.role === "admin") {
+      const admins = [...this.users.values()].filter((u) => u.role === "admin");
+      if (admins.length <= 1) {
+        return { ok: false, status: 400, error: "cannot delete the last admin" };
+      }
+    }
+    this.users.delete(id);
+    await this.ctx.storage.delete(`user:${id}`);
+    return { ok: true, user: toUserView(user) };
   }
 
   async createInstance(inst: Instance): Promise<InstanceView> {

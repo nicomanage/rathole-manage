@@ -138,9 +138,13 @@ operator-facing `client.toml`.
 
 ## Security notes
 
-- The panel uses username/password login and an HMAC-signed, `HttpOnly`,
-  `SameSite=Strict`, `Secure` session cookie. Credentials are never placed in a
-  WebSocket URL or browser storage.
+- The panel supports **multiple users** with `admin` / `viewer` roles, managed
+  under **Users** (admin only). Passwords are stored as PBKDF2-SHA256 hashes; the
+  `ADMIN_USERNAME` / `ADMIN_PASSWORD` env only bootstraps the first admin when the
+  user store is empty. Viewers get read-only access; only admins mutate instances,
+  settings, and users.
+- Login uses an HMAC-signed, `HttpOnly`, `SameSite=Strict`, `Secure` session
+  cookie. Credentials are never placed in a WebSocket URL or browser storage.
 - Each instance has its own random `agentToken`; agents authenticate with it and
   can only act on their own instance.
 - Set all production credentials with `wrangler secret put`. Serve the panel

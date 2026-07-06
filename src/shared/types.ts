@@ -54,6 +54,49 @@ export interface GlobalSettings {
   defaultHeartbeatInterval?: number;
 }
 
+// ---- users -----------------------------------------------------------------
+
+/** admin = full control; viewer = read-only access to the panel. */
+export type Role = "admin" | "viewer";
+
+/** A panel user. Stored in the hub; password is kept only as a PBKDF2 hash. */
+export interface User {
+  id: string;
+  username: string;
+  passwordHash: string;
+  passwordSalt: string;
+  passwordIterations: number;
+  role: Role;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** User shape safe to send to the browser (no password material). */
+export type UserView = Omit<User, "passwordHash" | "passwordSalt" | "passwordIterations">;
+
+export interface CreateUserInput {
+  username: string;
+  password: string;
+  role: Role;
+}
+
+export interface UpdateUserInput {
+  role?: Role;
+  /** When set, resets the user's password (admin action). */
+  password?: string;
+}
+
+export interface ChangePasswordInput {
+  currentPassword: string;
+  newPassword: string;
+}
+
+/** Identity of the currently authenticated user. */
+export interface Me {
+  username: string;
+  role: Role;
+}
+
 export type InstanceStatus = "online" | "offline" | "unknown";
 /** Reported state of the rathole process managed by an agent. */
 export type ProcessState = "running" | "stopped" | "errored" | "unknown";
