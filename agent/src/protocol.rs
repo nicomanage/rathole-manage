@@ -47,7 +47,11 @@ pub struct Metrics {
 
 /// Messages this agent sends up to the hub.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentToHub {
     Register {
         instance_id: String,
@@ -81,21 +85,15 @@ pub enum AgentToHub {
 
 /// Messages the hub sends down to this agent.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum HubToAgent {
-    Registered {
-        instance_id: String,
-        name: String,
-    },
-    ApplyConfig {
-        toml: String,
-        config_hash: String,
-    },
-    Command {
-        command: AgentCommand,
-    },
+    Registered { instance_id: String, name: String },
+    ApplyConfig { toml: String, config_hash: String },
+    Command { command: AgentCommand },
     Ping,
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }

@@ -25,7 +25,11 @@ pub struct Runner {
 
 impl Runner {
     pub fn new(config_path: PathBuf) -> Self {
-        Self { config_path, inner: None, last_error: None }
+        Self {
+            config_path,
+            inner: None,
+            last_error: None,
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -83,7 +87,10 @@ impl Runner {
                 }
             }
         });
-        self.inner = Some(Running { shutdown: tx, handle });
+        self.inner = Some(Running {
+            shutdown: tx,
+            handle,
+        });
         self.last_error = None;
     }
 

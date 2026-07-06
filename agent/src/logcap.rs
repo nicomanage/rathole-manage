@@ -45,6 +45,8 @@ impl ChannelMakeWriter {
 impl<'a> MakeWriter<'a> for ChannelMakeWriter {
     type Writer = ChannelWriter;
     fn make_writer(&'a self) -> Self::Writer {
-        ChannelWriter { tx: self.tx.clone() }
+        ChannelWriter {
+            tx: self.tx.clone(),
+        }
     }
 }

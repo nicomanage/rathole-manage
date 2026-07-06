@@ -1,0 +1,125 @@
+name: agent-ci
+
+# Builds the Rust agent (which embeds rathole). Lints + type-checks on every
+# push/PR, cross-compiles release binaries for Linux x86_64/aarch64 (gnu + musl),
+# and attaches them to a GitHub Release when a `v*` / `agent-v*` tag is pushed.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*", "agent-v*"]
+  pull_request:
+    paths:
+      - "agent/**"
+      - ".github/workflows/agent-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create releases / upload assets on tags
+
+defaults:
+  run:
+    working-directory: agent
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: x86_64-unknown-linux-musl
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          name="rathole-agent-${{ matrix.target }}"
+          staging="$name"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/rathole-agent" "$staging/"
+          cp rathole-agent.service agent.env.example "$staging/"
+          cp ../README.md "$staging/"
+          tar -czf "$name.tar.gz" "$staging"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "artifact=agent/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rathole-agent-${{ matrix.target }}
+          path: |
+            agent/rathole-agent-${{ matrix.target }}.tar.gz
+            agent/rathole-agent-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [lint, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true

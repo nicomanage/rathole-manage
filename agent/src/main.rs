@@ -39,11 +39,19 @@ fn load_config() -> Result<Config> {
     let config_path = std::env::var("CONFIG_PATH")
         .unwrap_or_else(|_| "/etc/rathole-manage/server.toml".to_string())
         .into();
-    Ok(Config { hub_url, instance_id, agent_token, config_path })
+    Ok(Config {
+        hub_url,
+        instance_id,
+        agent_token,
+        config_path,
+    })
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn build_ws_url(cfg: &Config) -> Result<String> {
@@ -78,7 +86,11 @@ async fn main() -> Result<()> {
         let to_hub_tx = to_hub_tx.clone();
         tokio::spawn(async move {
             while let Some(line) = log_rx.recv().await {
-                let msg = AgentToHub::Log { line, stream: Some("stdout".into()), ts: now_ms() };
+                let msg = AgentToHub::Log {
+                    line,
+                    stream: Some("stdout".into()),
+                    ts: now_ms(),
+                };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
                 }
@@ -106,7 +118,10 @@ async fn main() -> Result<()> {
                     hostname: hostname.clone(),
                     config_in_sync: None,
                 };
-                let msg = AgentToHub::Status { process_state: state, metrics: Some(metrics) };
+                let msg = AgentToHub::Status {
+                    process_state: state,
+                    metrics: Some(metrics),
+                };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
                 }
@@ -151,7 +166,9 @@ async fn connect_once(
         agent_version: Some(env!("CARGO_PKG_VERSION").into()),
         hostname: sysstat::hostname(),
     };
-    write.send(Message::Text(serde_json::to_string(&register)?)).await?;
+    write
+        .send(Message::Text(serde_json::to_string(&register)?))
+        .await?;
     tracing::info!("registered with hub");
 
     loop {
@@ -212,11 +229,17 @@ async fn handle_hub_message(
                     if !guard.is_running() {
                         guard.start();
                     }
-                    reply(AgentToHub::ConfigAck { ok: true, error: None });
+                    reply(AgentToHub::ConfigAck {
+                        ok: true,
+                        error: None,
+                    });
                 }
                 Err(e) => {
                     tracing::error!("failed to apply config: {e:#}");
-                    reply(AgentToHub::ConfigAck { ok: false, error: Some(format!("{e:#}")) });
+                    reply(AgentToHub::ConfigAck {
+                        ok: false,
+                        error: Some(format!("{e:#}")),
+                    });
                 }
             }
         }
@@ -231,8 +254,15 @@ async fn handle_hub_message(
             }
             let state = guard.state();
             drop(guard);
-            reply(AgentToHub::CommandResult { command, ok: true, error: None });
-            reply(AgentToHub::Status { process_state: state, metrics: None });
+            reply(AgentToHub::CommandResult {
+                command,
+                ok: true,
+                error: None,
+            });
+            reply(AgentToHub::Status {
+                process_state: state,
+                metrics: None,
+            });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),
         HubToAgent::Error { message } => {
