@@ -301,6 +301,7 @@ export class RatholeHub extends DurableObject<Env> {
       if (inst && this.ctx.getWebSockets(`agent:${id}`).length <= 1) {
         inst.status = "offline";
         inst.processState = "unknown";
+        inst.serviceStatus = undefined;
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
       }
@@ -319,7 +320,10 @@ export class RatholeHub extends DurableObject<Env> {
       const next: Instance["status"] = connected && !stale ? "online" : "offline";
       if (next !== inst.status) {
         inst.status = next;
-        if (next === "offline") inst.processState = "unknown";
+        if (next === "offline") {
+          inst.processState = "unknown";
+          inst.serviceStatus = undefined;
+        }
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
       }
@@ -356,6 +360,7 @@ export class RatholeHub extends DurableObject<Env> {
         inst.lastSeen = Date.now();
         inst.processState = msg.processState;
         if (msg.metrics) inst.metrics = { ...inst.metrics, ...msg.metrics };
+        if (msg.serviceStatus) inst.serviceStatus = msg.serviceStatus;
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
         break;
@@ -417,7 +422,8 @@ export class RatholeHub extends DurableObject<Env> {
   private pushConfig(inst: Instance, only?: WebSocket) {
     const toml = generateServerToml(inst.config, inst.name);
     const configHash = hashServerConfig(toml);
-    const msg: HubToAgent = { type: "apply_config", toml, configHash };
+    const services = inst.config.services.map((s) => ({ name: s.name, bindAddr: s.bindAddr }));
+    const msg: HubToAgent = { type: "apply_config", toml, configHash, services };
     const targets = only ? [only] : this.ctx.getWebSockets(`agent:${inst.id}`);
     for (const ws of targets) this.safeSend(ws, msg);
   }

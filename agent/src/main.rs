@@ -12,24 +12,30 @@
 
 mod enroll;
 mod logcap;
+mod probe;
 mod protocol;
 mod runner;
 mod sysstat;
 mod tui;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 use logcap::ChannelMakeWriter;
-use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics};
+use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics, ServiceRef};
 use runner::Runner;
+
+/// Services the agent probes for reachability, updated on each config apply.
+type SharedServices = Arc<Mutex<Vec<ServiceRef>>>;
 
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
 
@@ -158,6 +164,20 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Probe every known service concurrently, returning name -> online.
+async fn probe_services(services: &SharedServices) -> Option<HashMap<String, bool>> {
+    let list = services.lock().await.clone();
+    if list.is_empty() {
+        return None;
+    }
+    let checks = list.iter().map(|svc| {
+        let name = svc.name.clone();
+        let bind_addr = svc.bind_addr.clone();
+        async move { (name, probe::service_online(&bind_addr).await) }
+    });
+    Some(join_all(checks).await.into_iter().collect())
+}
+
 fn build_ws_url(cfg: &RunConfig) -> Result<String> {
     let u = Url::parse(&cfg.hub_base).context("invalid hub URL")?;
     let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
@@ -189,6 +209,7 @@ async fn run_daemon() -> Result<()> {
     tracing::info!(instance = %cfg.instance_id, hub = %cfg.hub_base, "rathole-agent starting");
 
     let runner = Arc::new(Mutex::new(Runner::new(cfg.config_path.clone())));
+    let services: SharedServices = Arc::new(Mutex::new(Vec::new()));
     let (to_hub_tx, mut to_hub_rx) = mpsc::unbounded_channel::<String>();
 
     // Forward captured log lines up to the hub.
@@ -208,10 +229,11 @@ async fn run_daemon() -> Result<()> {
         });
     }
 
-    // Periodic status + metrics.
+    // Periodic status + metrics + per-service reachability.
     {
         let to_hub_tx = to_hub_tx.clone();
         let runner = runner.clone();
+        let services = services.clone();
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
@@ -228,9 +250,11 @@ async fn run_daemon() -> Result<()> {
                     hostname: hostname.clone(),
                     config_in_sync: None,
                 };
+                let service_status = probe_services(&services).await;
                 let msg = AgentToHub::Status {
                     process_state: state,
                     metrics: Some(metrics),
+                    service_status,
                 };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
@@ -242,7 +266,7 @@ async fn run_daemon() -> Result<()> {
     // Connection loop with exponential backoff. rathole keeps running across drops.
     let mut backoff = 1u64;
     loop {
-        match connect_once(&cfg, &runner, &to_hub_tx, &mut to_hub_rx).await {
+        match connect_once(&cfg, &runner, &services, &to_hub_tx, &mut to_hub_rx).await {
             Ok(()) => {
                 tracing::warn!("hub connection closed, reconnecting");
                 backoff = 1;
@@ -259,6 +283,7 @@ async fn run_daemon() -> Result<()> {
 async fn connect_once(
     cfg: &RunConfig,
     runner: &Arc<Mutex<Runner>>,
+    services: &SharedServices,
     to_hub_tx: &mpsc::UnboundedSender<String>,
     to_hub_rx: &mut mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
@@ -286,7 +311,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        handle_hub_message(&text, runner, to_hub_tx).await;
+                        handle_hub_message(&text, runner, services, to_hub_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
@@ -309,6 +334,7 @@ async fn connect_once(
 async fn handle_hub_message(
     text: &str,
     runner: &Arc<Mutex<Runner>>,
+    services: &SharedServices,
     to_hub_tx: &mpsc::UnboundedSender<String>,
 ) {
     let msg: HubToAgent = match serde_json::from_str(text) {
@@ -329,8 +355,13 @@ async fn handle_hub_message(
         HubToAgent::Registered { name, .. } => {
             tracing::info!(%name, "hub acknowledged registration");
         }
-        HubToAgent::ApplyConfig { toml, config_hash } => {
+        HubToAgent::ApplyConfig {
+            toml,
+            config_hash,
+            services: svc_list,
+        } => {
             tracing::info!(hash = %config_hash, "applying config from hub");
+            *services.lock().await = svc_list;
             let mut guard = runner.lock().await;
             match guard.write_config(&toml).await {
                 Ok(()) => {
@@ -371,6 +402,7 @@ async fn handle_hub_message(
             reply(AgentToHub::Status {
                 process_state: state,
                 metrics: None,
+                service_status: None,
             });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),

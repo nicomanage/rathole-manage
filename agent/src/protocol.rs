@@ -5,7 +5,17 @@
 //! constructed on the agent side, so dead-code analysis is relaxed here.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// A service the agent probes for reachability.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRef {
+    pub name: String,
+    pub bind_addr: String,
+}
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +72,8 @@ pub enum AgentToHub {
     Status {
         process_state: ProcessState,
         metrics: Option<Metrics>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        service_status: Option<HashMap<String, bool>>,
     },
     Log {
         line: String,
@@ -91,9 +103,21 @@ pub enum AgentToHub {
     rename_all_fields = "camelCase"
 )]
 pub enum HubToAgent {
-    Registered { instance_id: String, name: String },
-    ApplyConfig { toml: String, config_hash: String },
-    Command { command: AgentCommand },
+    Registered {
+        instance_id: String,
+        name: String,
+    },
+    ApplyConfig {
+        toml: String,
+        config_hash: String,
+        #[serde(default)]
+        services: Vec<ServiceRef>,
+    },
+    Command {
+        command: AgentCommand,
+    },
     Ping,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }

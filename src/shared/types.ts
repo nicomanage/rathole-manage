@@ -130,6 +130,12 @@ export interface Instance {
   processState: ProcessState;
   lastSeen?: number;
   metrics?: AgentMetrics;
+  /**
+   * Per-service reachability reported by the agent: true when rathole is
+   * listening on the service's public port (i.e. a client is connected).
+   * Keyed by service name.
+   */
+  serviceStatus?: Record<string, boolean>;
   createdAt: number;
   updatedAt: number;
 }
@@ -144,7 +150,13 @@ export type InstanceView = Omit<Instance, "agentToken"> & {
 /** Messages an agent (running on a rathole box) sends to the hub. */
 export type AgentToHub =
   | { type: "register"; instanceId: string; token: string; agentVersion?: string; hostname?: string }
-  | { type: "status"; processState: ProcessState; metrics?: AgentMetrics }
+  | {
+      type: "status";
+      processState: ProcessState;
+      metrics?: AgentMetrics;
+      /** Per-service reachability, keyed by service name. */
+      serviceStatus?: Record<string, boolean>;
+    }
   | { type: "log"; line: string; stream?: "stdout" | "stderr"; ts?: number }
   | { type: "config_ack"; ok: boolean; error?: string }
   | { type: "command_result"; command: AgentCommand; ok: boolean; error?: string }
@@ -152,10 +164,16 @@ export type AgentToHub =
 
 export type AgentCommand = "start" | "stop" | "restart" | "reload" | "status";
 
+/** A service the agent should probe for reachability. */
+export interface ServiceRef {
+  name: string;
+  bindAddr: string;
+}
+
 /** Messages the hub sends down to an agent. */
 export type HubToAgent =
   | { type: "registered"; instanceId: string; name: string }
-  | { type: "apply_config"; toml: string; configHash: string }
+  | { type: "apply_config"; toml: string; configHash: string; services?: ServiceRef[] }
   | { type: "command"; command: AgentCommand }
   | { type: "ping" }
   | { type: "error"; message: string };

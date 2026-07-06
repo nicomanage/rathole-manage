@@ -22,6 +22,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useAuth } from "@/lib/auth";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -55,6 +64,7 @@ export function InstanceDetail() {
   const { id = "" } = useParams();
   const nav = useNavigate();
   const { instanceMap, loading, loadError, refresh } = useHubSocket();
+  const { isAdmin } = useAuth();
   const [pendingCommand, setPendingCommand] = useState<AgentCommand | null>(null);
   const instance = instanceMap.get(id);
 
@@ -120,33 +130,35 @@ export function InstanceDetail() {
             )}
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={instance.status !== "online" || pendingCommand !== null}
-            onClick={() => void runCommand("start")}
-          >
-            <Play className="h-4 w-4" /> Start
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={instance.status !== "online" || pendingCommand !== null}
-            onClick={() => void runCommand("restart")}
-          >
-            <RotateCw className="h-4 w-4" /> Restart
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={instance.status !== "online" || pendingCommand !== null}
-            onClick={() => void runCommand("stop")}
-          >
-            <Square className="h-4 w-4" /> Stop
-          </Button>
-          <DeleteButton id={id} name={instance.name} onDeleted={() => nav("/")} />
-        </div>
+        {isAdmin && (
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={instance.status !== "online" || pendingCommand !== null}
+              onClick={() => void runCommand("start")}
+            >
+              <Play className="h-4 w-4" /> Start
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={instance.status !== "online" || pendingCommand !== null}
+              onClick={() => void runCommand("restart")}
+            >
+              <RotateCw className="h-4 w-4" /> Restart
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={instance.status !== "online" || pendingCommand !== null}
+              onClick={() => void runCommand("stop")}
+            >
+              <Square className="h-4 w-4" /> Stop
+            </Button>
+            <DeleteButton id={id} name={instance.name} onDeleted={() => nav("/")} />
+          </div>
+        )}
       </div>
 
       <MetricsRow instance={instance} />
@@ -160,7 +172,13 @@ export function InstanceDetail() {
         </TabsList>
 
         <TabsContent value="config">
-          <ConfigEditor id={id} initial={instance.config} />
+          <ConfigEditor
+            id={id}
+            initial={instance.config}
+            serviceStatus={instance.serviceStatus}
+            online={instance.status === "online"}
+            canEdit={isAdmin}
+          />
         </TabsContent>
         <TabsContent value="client">
           <ClientConfig config={instance.config} publicHost={instance.publicHost} />
@@ -169,7 +187,7 @@ export function InstanceDetail() {
           <LogsPanel id={id} />
         </TabsContent>
         <TabsContent value="agent">
-          <AgentSetup id={id} bindAddr={instance.config.bindAddr} />
+          <AgentSetup id={id} bindAddr={instance.config.bindAddr} canReveal={isAdmin} />
         </TabsContent>
       </Tabs>
     </div>
@@ -212,12 +230,32 @@ function formatUptime(s: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }) {
+  const map = {
+    online: { cls: "bg-success", title: "Online — a client is connected" },
+    offline: { cls: "bg-muted-foreground/40", title: "Offline — no client connected" },
+    unknown: { cls: "bg-muted-foreground/25", title: "Unknown (node offline or unsaved)" },
+  } as const;
+  const { cls, title } = map[state];
+  return (
+    <span className="inline-flex items-center" title={title}>
+      <span className={cn("h-2.5 w-2.5 rounded-full", cls)} />
+    </span>
+  );
+}
+
 function ConfigEditor({
   id,
   initial,
+  serviceStatus,
+  online,
+  canEdit,
 }: {
   id: string;
   initial: RatholeConfig;
+  serviceStatus?: Record<string, boolean>;
+  online: boolean;
+  canEdit: boolean;
 }) {
   const [config, setConfig] = useState<RatholeConfig>(structuredClone(initial));
   const [saving, setSaving] = useState(false);
@@ -284,6 +322,11 @@ function ConfigEditor({
     }
   }
 
+  function serviceState(name: string): "online" | "offline" | "unknown" {
+    if (!online || !serviceStatus || !(name in serviceStatus)) return "unknown";
+    return serviceStatus[name] ? "online" : "offline";
+  }
+
   return (
     <div className="space-y-6">
       <Card>
@@ -297,6 +340,7 @@ function ConfigEditor({
               aria-invalid={issueByPath.has("bindAddr")}
               className={cn("font-mono", issueByPath.has("bindAddr") && "border-destructive")}
               value={config.bindAddr}
+              disabled={!canEdit}
               onChange={(e) => patch({ bindAddr: e.target.value })}
             />
             {issueByPath.has("bindAddr") && (
@@ -309,12 +353,17 @@ function ConfigEditor({
               className="font-mono"
               placeholder="shared secret"
               value={config.defaultToken ?? ""}
+              disabled={!canEdit}
               onChange={(e) => patch({ defaultToken: e.target.value })}
             />
           </div>
           <div className="space-y-2">
             <Label>Transport</Label>
-            <Select value={config.transport} onValueChange={(v) => patch({ transport: v as TransportType })}>
+            <Select
+              value={config.transport}
+              disabled={!canEdit}
+              onValueChange={(v) => patch({ transport: v as TransportType })}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -333,6 +382,7 @@ function ConfigEditor({
               type="number"
               value={config.heartbeatInterval ?? ""}
               placeholder="30"
+              disabled={!canEdit}
               onChange={(e) =>
                 patch({ heartbeatInterval: e.target.value ? Number(e.target.value) : undefined })
               }
@@ -344,92 +394,118 @@ function ConfigEditor({
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Services ({config.services.length})</CardTitle>
-          <Button variant="outline" size="sm" onClick={addService}>
-            <Plus className="h-4 w-4" /> Add service
-          </Button>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {config.services.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              No services. Add one to forward a port from behind NAT.
-            </p>
+          {canEdit && (
+            <Button variant="outline" size="sm" onClick={addService}>
+              <Plus className="h-4 w-4" /> Add service
+            </Button>
           )}
-          {config.services.map((svc, i) => {
-            const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
-            return (
-              <div key={i} className="rounded-lg border p-4">
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Name</Label>
-                    <Input
-                      className="font-mono"
-                      value={svc.name}
-                      onChange={(e) => updateService(i, { name: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Type</Label>
-                    <Select value={svc.type} onValueChange={(v) => updateService(i, { type: v as "tcp" | "udp" })}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="tcp">tcp</SelectItem>
-                        <SelectItem value="udp">udp</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Public bind (server)</Label>
-                    <Input
-                      aria-invalid={!!publicBindIssue}
-                      className={cn("font-mono", publicBindIssue && "border-destructive")}
-                      value={svc.bindAddr}
-                      onChange={(e) => updateService(i, { bindAddr: e.target.value })}
-                    />
-                    {publicBindIssue && (
-                      <p className="text-xs text-destructive">{publicBindIssue}</p>
-                    )}
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Local addr (client)</Label>
-                    <Input
-                      className="font-mono"
-                      placeholder="127.0.0.1:22"
-                      value={svc.clientLocalAddr ?? ""}
-                      onChange={(e) => updateService(i, { clientLocalAddr: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Token (optional)</Label>
-                    <Input
-                      className="font-mono"
-                      placeholder="inherits default"
-                      value={svc.token ?? ""}
-                      onChange={(e) => updateService(i, { token: e.target.value })}
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 pt-6">
-                    <Switch
-                      checked={!!svc.nodelay}
-                      onCheckedChange={(v) => updateService(i, { nodelay: v })}
-                    />
-                    <Label className="text-xs">nodelay</Label>
-                  </div>
-                  <div className="flex items-end justify-end pt-6 lg:col-span-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => removeService(i)}
-                    >
-                      <Trash2 className="h-4 w-4" /> Remove
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        </CardHeader>
+        <CardContent className="p-0">
+          {config.services.length === 0 ? (
+            <p className="px-6 pb-6 text-sm text-muted-foreground">
+              No services. {canEdit ? "Add one to forward a port from behind NAT." : ""}
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16 text-center">Online</TableHead>
+                  <TableHead className="min-w-32">Name</TableHead>
+                  <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  <TableHead className="min-w-40">Local addr (client)</TableHead>
+                  <TableHead className="min-w-36">Token</TableHead>
+                  <TableHead className="w-20 text-center">nodelay</TableHead>
+                  {canEdit && <TableHead className="w-12" />}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {config.services.map((svc, i) => {
+                  const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
+                  return (
+                    <TableRow key={i} className="align-top">
+                      <TableCell className="text-center">
+                        <ServiceStatusDot state={serviceState(svc.name)} />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
+                          value={svc.name}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { name: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={svc.type}
+                          disabled={!canEdit}
+                          onValueChange={(v) => updateService(i, { type: v as "tcp" | "udp" })}
+                        >
+                          <SelectTrigger className="h-8">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="tcp">tcp</SelectItem>
+                            <SelectItem value="udp">udp</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          aria-invalid={!!publicBindIssue}
+                          className={cn("h-8 font-mono", publicBindIssue && "border-destructive")}
+                          value={svc.bindAddr}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { bindAddr: e.target.value })}
+                        />
+                        {publicBindIssue && (
+                          <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
+                          placeholder="127.0.0.1:22"
+                          value={svc.clientLocalAddr ?? ""}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { clientLocalAddr: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
+                          placeholder="inherits default"
+                          value={svc.token ?? ""}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { token: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <Switch
+                          checked={!!svc.nodelay}
+                          disabled={!canEdit}
+                          onCheckedChange={(v) => updateService(i, { nodelay: v })}
+                        />
+                      </TableCell>
+                      {canEdit && (
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:text-destructive"
+                            title="Remove service"
+                            onClick={() => removeService(i)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
 
@@ -446,13 +522,15 @@ function ConfigEditor({
         </Card>
       )}
 
-      <div className="sticky bottom-4 flex items-center justify-end gap-3">
-        {dirty && <span className="text-sm text-muted-foreground">Unsaved changes</span>}
-        <Button onClick={save} disabled={!dirty || saving || issues.length > 0}>
-          <Save className="h-4 w-4" />
-          {saving ? "Saving…" : "Save & push"}
-        </Button>
-      </div>
+      {canEdit && (
+        <div className="sticky bottom-4 flex items-center justify-end gap-3">
+          {dirty && <span className="text-sm text-muted-foreground">Unsaved changes</span>}
+          <Button onClick={save} disabled={!dirty || saving || issues.length > 0}>
+            <Save className="h-4 w-4" />
+            {saving ? "Saving…" : "Save & push"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -519,7 +597,15 @@ function LogsPanel({ id }: { id: string }) {
   );
 }
 
-function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
+function AgentSetup({
+  id,
+  bindAddr,
+  canReveal,
+}: {
+  id: string;
+  bindAddr: string;
+  canReveal: boolean;
+}) {
   const [token, setRevealed] = useState<string | null>(null);
   const origin = location.origin;
 
@@ -560,15 +646,19 @@ function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
             created by that flow. Source is in <code className="font-mono">/agent</code>.
           </p>
           <CodeBlock code={loginFlow} filename="enroll.sh" language="bash" />
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" onClick={reveal}>
-              {token ? "Token revealed below" : "Reveal agent token"}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Listens on <code className="font-mono">{bindAddr}</code>
-            </span>
-          </div>
-          <CodeBlock code={staticFlow} filename="agent.env" language="bash" />
+          {canReveal && (
+            <>
+              <div className="flex items-center gap-3">
+                <Button variant="outline" size="sm" onClick={reveal}>
+                  {token ? "Token revealed below" : "Reveal agent token"}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  Listens on <code className="font-mono">{bindAddr}</code>
+                </span>
+              </div>
+              <CodeBlock code={staticFlow} filename="agent.env" language="bash" />
+            </>
+          )}
         </CardContent>
       </Card>
     </div>
