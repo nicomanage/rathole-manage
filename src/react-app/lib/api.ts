@@ -1,6 +1,5 @@
 import type {
   AgentCommand,
-  CreateInstanceInput,
   GlobalSettings,
   InstanceView,
   UpdateInstanceInput,
@@ -71,12 +70,6 @@ export const api = {
     }),
 
   listInstances: () => req<{ instances: InstanceView[] }>("/api/instances"),
-
-  createInstance: (input: CreateInstanceInput) =>
-    req<{ instance: InstanceView }>("/api/instances", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
 
   updateInstance: (id: string, input: UpdateInstanceInput) =>
     req<{ instance: InstanceView }>(`/api/instances/${id}`, {

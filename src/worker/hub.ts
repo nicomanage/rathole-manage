@@ -93,6 +93,14 @@ export class RatholeHub extends DurableObject<Env> {
     return this.instances.get(id);
   }
 
+  /** Find an instance previously enrolled by the given node id (for idempotent re-enroll). */
+  async findInstanceByNodeId(nodeId: string): Promise<Instance | undefined> {
+    for (const inst of this.instances.values()) {
+      if (inst.enrollNodeId && inst.enrollNodeId === nodeId) return inst;
+    }
+    return undefined;
+  }
+
   async getSettings(): Promise<GlobalSettings> {
     return { ...this.settings };
   }

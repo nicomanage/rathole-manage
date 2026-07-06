@@ -12,6 +12,7 @@ import { defaultConfig, validateConfig } from "@shared/config-generator";
 import type {
   AgentCommand,
   CreateInstanceInput,
+  EnrollInput,
   GlobalSettings,
   Instance,
   RatholeConfig,
@@ -157,7 +158,11 @@ function randomToken(len = 32): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function newInstance(input: CreateInstanceInput, settings: GlobalSettings): Instance {
+function newInstance(
+  input: CreateInstanceInput,
+  settings: GlobalSettings,
+  enrollNodeId?: string,
+): Instance {
   const now = Date.now();
   const base: RatholeConfig = {
     ...defaultConfig(),
@@ -177,6 +182,7 @@ function newInstance(input: CreateInstanceInput, settings: GlobalSettings): Inst
     name: input.name.trim() || "unnamed",
     publicHost: input.publicHost?.trim() || undefined,
     agentToken: randomToken(),
+    enrollNodeId,
     config,
     status: "offline",
     processState: "unknown",
@@ -221,6 +227,45 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
   // instead of generating a noisy 401 in the browser console.
   if (path === "/api/session" && req.method === "GET") {
     return json({ authenticated: await checkAdmin(req, env) });
+  }
+
+  // ---- agent self-enrollment --------------------------------------------
+  // Lets an agent create (or idempotently reclaim) its own instance without an
+  // operator pre-creating it in the panel. Authorized by the admin
+  // username/password session cookie the agent obtains from its TUI login.
+  if (path === "/api/agent/enroll") {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (!(await checkAdmin(req, env))) return unauthorized();
+
+    const body = (await req.json().catch(() => ({}))) as Partial<EnrollInput>;
+    const nodeId = body.nodeId?.trim();
+    if (!nodeId) return json({ error: "nodeId is required" }, 400);
+
+    const stub = hub(env);
+    const existing = await stub.findInstanceByNodeId(nodeId);
+    if (existing) {
+      // Idempotent: same node re-enrolling reclaims its existing credentials.
+      return json({
+        instanceId: existing.id,
+        agentToken: existing.agentToken,
+        name: existing.name,
+        created: false,
+      });
+    }
+
+    const name = body.name?.trim() || `node-${nodeId.slice(0, 8)}`;
+    const inst = newInstance(
+      { name, publicHost: body.publicHost?.trim() || undefined },
+      await stub.getSettings(),
+      nodeId,
+    );
+    const issues = validateConfig(inst.config);
+    if (issues.length > 0) return json({ error: "invalid configuration", issues }, 400);
+    await stub.createInstance(inst);
+    return json(
+      { instanceId: inst.id, agentToken: inst.agentToken, name: inst.name, created: true },
+      201,
+    );
   }
 
   // ---- agent WebSocket (token = instance agentToken) --------------------
@@ -296,20 +341,11 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- collection: /api/instances ---------------------------------------
+  // Instances are created only via agent self-enrollment (/api/agent/enroll);
+  // the panel lists and manages them but does not create them manually.
   if (path === "/api/instances") {
     if (req.method === "GET") {
       return json({ instances: await stub.listInstances() });
-    }
-    if (req.method === "POST") {
-      const body = (await req.json().catch(() => ({}))) as CreateInstanceInput;
-      if (!body.name?.trim()) return json({ error: "name is required" }, 400);
-      const inst = newInstance(body, await stub.getSettings());
-      const issues = validateConfig(inst.config);
-      if (issues.length > 0) {
-        return json({ error: "invalid configuration", issues }, 400);
-      }
-      const view = await stub.createInstance(inst);
-      return json({ instance: view }, 201);
     }
     return json({ error: "method not allowed" }, 405);
   }

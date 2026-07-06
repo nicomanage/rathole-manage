@@ -23,6 +23,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
+# HTTP client for the interactive `login` flow: POST /api/login (captures the
+# session cookie) then POST /api/agent/enroll. Cookie store persists the session
+# between the two calls. rustls TLS, no system OpenSSL needed.
+ureq = { version = "2", default-features = false, features = ["tls", "json", "cookies"] }
+
+# Terminal UI for `rathole-agent login` (Hub URL / username / password form).
+ratatui = "0.28"
+crossterm = "0.28"
+
 # rathole's build pulls openssl-sys transitively (vergen -> git2). We don't use
 # openssl directly, but enabling its `vendored` feature makes openssl-sys build
 # a static OpenSSL from source, so the agent cross-compiles cleanly for musl /

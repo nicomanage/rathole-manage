@@ -77,6 +77,11 @@ export interface Instance {
   publicHost?: string;
   /** Secret the agent uses to authenticate its WebSocket to the hub. */
   agentToken: string;
+  /**
+   * Stable identifier of the node that self-enrolled this instance (e.g. the
+   * machine-id). Lets a re-enrolling agent reclaim its instance idempotently.
+   */
+  enrollNodeId?: string;
   config: RatholeConfig;
   status: InstanceStatus;
   processState: ProcessState;
@@ -136,4 +141,22 @@ export interface UpdateInstanceInput {
   name?: string;
   publicHost?: string;
   config?: RatholeConfig;
+}
+
+/** Body an agent POSTs to /api/agent/enroll to self-register a node. */
+export interface EnrollInput {
+  /** Stable node identity (machine-id / persisted uuid) for idempotency. */
+  nodeId: string;
+  /** Desired instance name; defaults to the node hostname. */
+  name?: string;
+  publicHost?: string;
+}
+
+/** Credentials the hub returns to a freshly enrolled (or re-enrolled) agent. */
+export interface EnrollResult {
+  instanceId: string;
+  agentToken: string;
+  name: string;
+  /** True when this enrollment created a new instance rather than reclaiming one. */
+  created: boolean;
 }

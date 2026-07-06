@@ -1,5 +1,5 @@
 # Copy to `.dev.vars` for local `wrangler dev`. Do NOT commit `.dev.vars`.
-# In production set all three with `wrangler secret put <NAME>`.
+# In production set these with `wrangler secret put <NAME>`.
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-a-strong-password
 SESSION_SECRET=replace-with-at-least-32-random-bytes

@@ -4,19 +4,28 @@
 //! hub over WebSocket, applies the config the panel generates, streams logs and
 //! metrics back, and executes start/stop/restart commands. The embedded rathole
 //! keeps serving tunnels even while the hub is unreachable.
+//!
+//! Commands:
+//!   rathole-agent login   interactive TUI: sign in with your panel account and
+//!                         enroll this node (saves an identity file)
+//!   rathole-agent run     (default) run the daemon using the saved identity
 
+mod enroll;
 mod logcap;
 mod protocol;
 mod runner;
 mod sysstat;
+mod tui;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 use logcap::ChannelMakeWriter;
 use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics};
@@ -24,27 +33,122 @@ use runner::Runner;
 
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
 
-struct Config {
-    hub_url: String,
+/// Everything the daemon needs to connect and manage its instance.
+struct RunConfig {
+    /// Panel origin (http/https), e.g. `https://panel.example.com`.
+    hub_base: String,
     instance_id: String,
     agent_token: String,
-    config_path: std::path::PathBuf,
+    config_path: PathBuf,
 }
 
-fn load_config() -> Result<Config> {
-    let hub_url = std::env::var("HUB_URL")
-        .context("HUB_URL is required, e.g. wss://panel.example.com/api/agent/ws")?;
-    let instance_id = std::env::var("INSTANCE_ID").context("INSTANCE_ID is required")?;
-    let agent_token = std::env::var("AGENT_TOKEN").context("AGENT_TOKEN is required")?;
-    let config_path = std::env::var("CONFIG_PATH")
+fn main() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("login") | Some("enroll") => cmd_login(),
+        None | Some("run") => cmd_run(),
+        Some("--version") | Some("-V") => {
+            println!("rathole-agent {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("--help") | Some("-h") | Some("help") => {
+            print_usage();
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown command: {other}\n");
+            print_usage();
+            std::process::exit(2);
+        }
+    }
+}
+
+fn print_usage() {
+    eprintln!(
+        "rathole-agent {v}
+
+USAGE:
+    rathole-agent [COMMAND]
+
+COMMANDS:
+    run      Run the agent daemon (default). Requires an enrolled identity.
+    login    Sign in with your panel account (TUI) and enroll this node.
+
+The daemon reads its identity from {path} (created by `login`), or from the
+INSTANCE_ID / AGENT_TOKEN / HUB_URL environment variables.",
+        v = env!("CARGO_PKG_VERSION"),
+        path = enroll::identity_path().display(),
+    );
+}
+
+// ---- login command ---------------------------------------------------------
+
+fn cmd_login() -> Result<()> {
+    match tui::run_login()? {
+        Some(identity) => {
+            let path = enroll::identity_path();
+            identity.save(&path)?;
+            println!(
+                "\n✓ Enrolled \"{}\" (instance {}).",
+                identity.name, identity.instance_id
+            );
+            println!("  Identity saved to {}.", path.display());
+            println!("  Start the node:  sudo systemctl enable --now rathole-agent");
+            Ok(())
+        }
+        None => {
+            println!("Enrollment cancelled.");
+            Ok(())
+        }
+    }
+}
+
+// ---- run command -----------------------------------------------------------
+
+fn cmd_run() -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    rt.block_on(run_daemon())
+}
+
+fn resolve_run_config() -> Result<RunConfig> {
+    let config_path: PathBuf = std::env::var("CONFIG_PATH")
         .unwrap_or_else(|_| "/etc/rathole-manage/server.toml".to_string())
         .into();
-    Ok(Config {
-        hub_url,
-        instance_id,
-        agent_token,
-        config_path,
-    })
+
+    // 1) Explicit env credentials win (non-interactive / static provisioning).
+    if let (Ok(instance_id), Ok(agent_token), Ok(hub_url)) = (
+        std::env::var("INSTANCE_ID"),
+        std::env::var("AGENT_TOKEN"),
+        std::env::var("HUB_URL"),
+    ) {
+        if !instance_id.is_empty() && !agent_token.is_empty() {
+            return Ok(RunConfig {
+                hub_base: enroll::http_origin(&hub_url)?,
+                instance_id,
+                agent_token,
+                config_path,
+            });
+        }
+    }
+
+    // 2) Persisted identity from `rathole-agent login`.
+    let path = enroll::identity_path();
+    if let Some(id) = enroll::Identity::load(&path)? {
+        return Ok(RunConfig {
+            hub_base: id.hub_url,
+            instance_id: id.instance_id,
+            agent_token: id.agent_token,
+            config_path,
+        });
+    }
+
+    bail!(
+        "no identity found at {}.\nRun `rathole-agent login` to enroll this node, \
+         or set INSTANCE_ID / AGENT_TOKEN / HUB_URL.",
+        path.display()
+    )
 }
 
 fn now_ms() -> u64 {
@@ -54,16 +158,22 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn build_ws_url(cfg: &Config) -> Result<String> {
-    let mut url = url::Url::parse(&cfg.hub_url).context("HUB_URL is not a valid URL")?;
-    url.query_pairs_mut()
+fn build_ws_url(cfg: &RunConfig) -> Result<String> {
+    let u = Url::parse(&cfg.hub_base).context("invalid hub URL")?;
+    let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
+    let host = u.host_str().context("hub URL has no host")?;
+    let authority = match u.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let mut ws = Url::parse(&format!("{scheme}://{authority}/api/agent/ws"))?;
+    ws.query_pairs_mut()
         .append_pair("instance", &cfg.instance_id)
         .append_pair("token", &cfg.agent_token);
-    Ok(url.to_string())
+    Ok(ws.to_string())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run_daemon() -> Result<()> {
     // Route all tracing (agent + embedded rathole) into a channel for streaming.
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<String>();
     tracing_subscriber::fmt()
@@ -75,8 +185,8 @@ async fn main() -> Result<()> {
         .with_writer(ChannelMakeWriter::new(log_tx))
         .init();
 
-    let cfg = load_config()?;
-    tracing::info!(instance = %cfg.instance_id, "rathole-agent starting");
+    let cfg = resolve_run_config()?;
+    tracing::info!(instance = %cfg.instance_id, hub = %cfg.hub_base, "rathole-agent starting");
 
     let runner = Arc::new(Mutex::new(Runner::new(cfg.config_path.clone())));
     let (to_hub_tx, mut to_hub_rx) = mpsc::unbounded_channel::<String>();
@@ -147,7 +257,7 @@ async fn main() -> Result<()> {
 }
 
 async fn connect_once(
-    cfg: &Config,
+    cfg: &RunConfig,
     runner: &Arc<Mutex<Runner>>,
     to_hub_tx: &mpsc::UnboundedSender<String>,
     to_hub_rx: &mut mpsc::UnboundedReceiver<String>,
@@ -176,7 +286,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        handle_hub_message(&text, cfg, runner, to_hub_tx).await;
+                        handle_hub_message(&text, runner, to_hub_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
@@ -198,7 +308,6 @@ async fn connect_once(
 
 async fn handle_hub_message(
     text: &str,
-    _cfg: &Config,
     runner: &Arc<Mutex<Runner>>,
     to_hub_tx: &mpsc::UnboundedSender<String>,
 ) {
@@ -268,8 +377,7 @@ async fn handle_hub_message(
         HubToAgent::Error { message } => {
             tracing::warn!("hub error: {message}");
             if message.contains("token") || message.contains("unauthorized") {
-                // Fatal auth problem — surface it clearly.
-                tracing::error!("authentication rejected by hub; check AGENT_TOKEN / INSTANCE_ID");
+                tracing::error!("authentication rejected by hub; re-run `rathole-agent login`");
             }
         }
     }

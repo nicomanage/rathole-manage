@@ -1,8 +1,10 @@
 # systemd unit for the rathole-manage agent.
-# Install to /etc/systemd/system/rathole-agent.service, then:
+# First enroll the node interactively (writes /var/lib/rathole-manage/identity.json):
+#   sudo IDENTITY_PATH=/var/lib/rathole-manage/identity.json rathole-agent login
+# Then install this unit and start it:
 #   systemctl daemon-reload && systemctl enable --now rathole-agent
 #
-# Put the connection settings in /etc/rathole-manage/agent.env (see agent.env.example).
+# Optional overrides go in /etc/rathole-manage/agent.env (see agent.env.example).
 
 [Unit]
 Description=rathole-manage agent (embeds rathole)
@@ -11,8 +13,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/rathole-manage/agent.env
-ExecStart=/usr/local/bin/rathole-agent
+# EnvironmentFile is optional; the daemon reads its identity file by default.
+EnvironmentFile=-/etc/rathole-manage/agent.env
+ExecStart=/usr/local/bin/rathole-agent run
 Restart=always
 RestartSec=5
 # rathole needs to bind low ports for services; grant the capability instead of root.

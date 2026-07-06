@@ -521,7 +521,7 @@ function LogsPanel({ id }: { id: string }) {
 
 function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
   const [token, setRevealed] = useState<string | null>(null);
-  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/agent/ws`;
+  const origin = location.origin;
 
   async function reveal() {
     try {
@@ -532,14 +532,18 @@ function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
     }
   }
 
-  const env = [
-    `# on your rathole server:`,
-    `export HUB_URL="${wsUrl}"`,
+  const loginFlow = [
+    `# on your rathole server, after installing rathole-agent:`,
+    `rathole-agent login    # sign in with your panel account at ${origin}`,
+    `#   → enrolls the node and connects it automatically`,
+  ].join("\n");
+
+  const staticFlow = [
+    `# alternative: provision this instance statically (no interactive login)`,
+    `export HUB_URL="${origin}"`,
     `export INSTANCE_ID="${id}"`,
     `export AGENT_TOKEN="${token ?? "<click reveal token>"}"`,
-    ``,
-    `# build & run the Rust agent (embeds rathole, no separate binary needed):`,
-    `cargo run --release`,
+    `rathole-agent run`,
   ].join("\n");
 
   return (
@@ -551,10 +555,11 @@ function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
         <CardContent className="space-y-4 text-sm">
           <p className="text-muted-foreground">
             The agent is a small Rust binary that depends on the <code className="font-mono">rathole</code>{" "}
-            crate and runs the server <span className="font-medium">in-process</span>. It dials this hub over
-            WebSocket, applies the server config the Worker generates, and streams logs back. Source is in{" "}
-            <code className="font-mono">/agent</code>.
+            crate and runs the server <span className="font-medium">in-process</span>. Nodes enroll
+            themselves via <code className="font-mono">rathole-agent login</code>; this instance was
+            created by that flow. Source is in <code className="font-mono">/agent</code>.
           </p>
+          <CodeBlock code={loginFlow} filename="enroll.sh" language="bash" />
           <div className="flex items-center gap-3">
             <Button variant="outline" size="sm" onClick={reveal}>
               {token ? "Token revealed below" : "Reveal agent token"}
@@ -563,7 +568,7 @@ function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
               Listens on <code className="font-mono">{bindAddr}</code>
             </span>
           </div>
-          <CodeBlock code={env} filename="agent.env" language="bash" />
+          <CodeBlock code={staticFlow} filename="agent.env" language="bash" />
         </CardContent>
       </Card>
     </div>

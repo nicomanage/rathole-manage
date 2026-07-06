@@ -80,27 +80,32 @@ first deploy.
 
 ## Connect a rathole node (Rust agent)
 
-1. In the panel, create an instance and open its **Agent setup** tab. Reveal the
-   agent token.
-2. On the server:
+Nodes **self-enroll** — you don't create instances in the panel. On the server,
+build the agent and run its interactive `login`, signing in with your panel
+account:
 
-   ```bash
-   cd agent
-   cargo build --release
-   sudo install -m0755 target/release/rathole-agent /usr/local/bin/
+```bash
+cd agent
+cargo build --release
+sudo install -m0755 target/release/rathole-agent /usr/local/bin/
 
-   sudo mkdir -p /etc/rathole-manage /var/lib/rathole-manage
-   sudo cp agent.env.example /etc/rathole-manage/agent.env
-   sudo $EDITOR /etc/rathole-manage/agent.env      # HUB_URL / INSTANCE_ID / AGENT_TOKEN
+# Interactive TUI: enter the panel URL + your admin username/password.
+# This enrolls the node and writes /var/lib/rathole-manage/identity.json.
+sudo IDENTITY_PATH=/var/lib/rathole-manage/identity.json rathole-agent login
 
-   sudo cp rathole-agent.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now rathole-agent
-   ```
+# Run it as a service (reads the saved identity).
+sudo cp rathole-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rathole-agent
+```
 
-The instance turns **online** in the panel, the config you built is pushed down,
-and rathole starts serving. Editing config in the panel re-pushes it and rathole
-hot-reloads.
+The node appears in the panel automatically and turns **online**. From there,
+edit its services; the Worker generates `server.toml` and pushes it, and the
+embedded rathole hot-reloads. Re-running `login` on the same machine reclaims the
+same instance (idempotent by machine-id), so it never creates duplicates.
+
+For non-interactive fleets you can skip `login` and set `HUB_URL`, `INSTANCE_ID`
+and `AGENT_TOKEN` in the environment instead (see `agent/agent.env.example`).
 
 ## Config model → rathole TOML
 

@@ -1,32 +1,11 @@
-import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
-import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { StatusDot, ProcessBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { relativeTime } from "@/lib/utils";
-import { AlertTriangle, ArrowRight, Plus, RefreshCw, Server, Wifi, WifiOff } from "lucide-react";
-import { toast } from "sonner";
-import type { GlobalSettings, TransportType } from "@shared/types";
-
-const FALLBACK_SETTINGS: GlobalSettings = {
-  defaultBindAddr: "0.0.0.0:2333",
-  defaultTransport: "tcp",
-};
+import { AlertTriangle, ArrowRight, RefreshCw, Server, Wifi, WifiOff } from "lucide-react";
 
 export function Dashboard() {
   const { instances, conn, loading, loadError, refresh } = useHubSocket();
@@ -49,7 +28,6 @@ export function Dashboard() {
             <span>· {loading ? "Loading instances…" : `${instances.length} managed`}</span>
           </p>
         </div>
-        <CreateInstanceDialog />
       </div>
 
       {loading ? (
@@ -76,10 +54,12 @@ export function Dashboard() {
             <span className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
               <Server className="h-6 w-6 text-muted-foreground" />
             </span>
-            <div>
+            <div className="max-w-md space-y-1">
               <p className="font-medium">No instances yet</p>
               <p className="text-sm text-muted-foreground">
-                Create one, then run the Rust agent on your rathole server to connect it.
+                Instances register themselves. On your rathole server run{" "}
+                <code className="font-mono">rathole-agent login</code>, sign in with your panel
+                account, and the node self-enrolls and appears here automatically.
               </p>
             </div>
           </CardContent>
@@ -147,135 +127,5 @@ function InstancesLoading() {
         </Card>
       ))}
     </div>
-  );
-}
-
-function CreateInstanceDialog() {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [publicHost, setPublicHost] = useState("");
-  const [bindAddr, setBindAddr] = useState("0.0.0.0:2333");
-  const [transport, setTransport] = useState<TransportType>("tcp");
-  const [defaults, setDefaults] = useState<GlobalSettings>(FALLBACK_SETTINGS);
-  const [loadingDefaults, setLoadingDefaults] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    let active = true;
-    setLoadingDefaults(true);
-    api.getSettings()
-      .then(({ settings }) => {
-        if (!active) return;
-        setDefaults(settings);
-        setPublicHost("");
-        setBindAddr(settings.defaultBindAddr);
-        setTransport(settings.defaultTransport);
-      })
-      .catch((error) => toast.error((error as Error).message))
-      .finally(() => {
-        if (active) setLoadingDefaults(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [open]);
-
-  async function create() {
-    setBusy(true);
-    try {
-      await api.createInstance({
-        name,
-        publicHost: publicHost || undefined,
-        config: {
-          bindAddr,
-          transport,
-          heartbeatInterval: defaults.defaultHeartbeatInterval,
-          services: [],
-        },
-      });
-      toast.success(`Created "${name}"`);
-      setOpen(false);
-      setName("");
-    } catch (e) {
-      toast.error((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button>
-          <Plus className="h-4 w-4" />
-          New instance
-        </Button>
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>New rathole instance</DialogTitle>
-          <DialogDescription>
-            A managed rathole server node. You'll connect an agent to it afterwards.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              autoFocus
-              placeholder="edge-tokyo-01"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="host">Public host (optional)</Label>
-            <Input
-              id="host"
-              placeholder="tunnel.example.com"
-              value={publicHost}
-              onChange={(e) => setPublicHost(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="bind">Control channel bind address</Label>
-            <Input
-              id="bind"
-              className="font-mono"
-              value={bindAddr}
-              onChange={(e) => setBindAddr(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Transport</Label>
-            <Select
-              value={transport}
-              onValueChange={(value) => setTransport(value as TransportType)}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(["tcp", "tls", "noise", "websocket"] as TransportType[]).map((value) => (
-                  <SelectItem key={value} value={value}>
-                    {value}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={create} disabled={busy || loadingDefaults || !name.trim()}>
-            {busy ? "Creating…" : "Create"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
