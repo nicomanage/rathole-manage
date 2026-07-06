@@ -1,10 +1,10 @@
 import type {
+  AgentCommand,
   CreateInstanceInput,
-  GeneratedConfigs,
+  GlobalSettings,
   InstanceView,
   UpdateInstanceInput,
 } from "@shared/types";
-import type { ValidationIssue } from "@shared/config-generator";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -42,12 +42,25 @@ export const api = {
 
   async checkSession(): Promise<boolean> {
     const res = await fetch("/api/session", { credentials: "same-origin" });
-    return res.ok;
+    if (!res.ok) return false;
+    const body = (await res.json()) as { authenticated?: boolean };
+    return body.authenticated === true;
   },
 
   async logout(): Promise<void> {
     await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
   },
+
+  getSettings: () => req<{ settings: GlobalSettings }>("/api/settings"),
+
+  updateSettings: (settings: GlobalSettings) =>
+    req<{ settings: GlobalSettings }>("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...settings,
+        defaultHeartbeatInterval: settings.defaultHeartbeatInterval ?? null,
+      }),
+    }),
 
   listInstances: () => req<{ instances: InstanceView[] }>("/api/instances"),
 
@@ -66,13 +79,10 @@ export const api = {
   deleteInstance: (id: string) =>
     req<{ ok: boolean }>(`/api/instances/${id}`, { method: "DELETE" }),
 
-  getConfig: (id: string) =>
-    req<GeneratedConfigs & { issues: ValidationIssue[] }>(`/api/instances/${id}/config`),
-
   revealToken: (id: string) =>
     req<{ agentToken: string }>(`/api/instances/${id}/reveal`),
 
-  sendCommand: (id: string, command: string) =>
+  sendCommand: (id: string, command: AgentCommand) =>
     req<{ delivered: boolean }>(`/api/instances/${id}/command`, {
       method: "POST",
       body: JSON.stringify({ command }),

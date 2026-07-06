@@ -8,10 +8,11 @@
 //   everything else — static SPA assets (the shadcn panel)
 
 import { RatholeHub } from "./hub";
-import { generateConfigs, defaultConfig, validateConfig } from "@shared/config-generator";
+import { defaultConfig, validateConfig } from "@shared/config-generator";
 import type {
   AgentCommand,
   CreateInstanceInput,
+  GlobalSettings,
   Instance,
   RatholeConfig,
   UpdateInstanceInput,
@@ -156,14 +157,21 @@ function randomToken(len = 32): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function newInstance(input: CreateInstanceInput): Instance {
+function newInstance(input: CreateInstanceInput, settings: GlobalSettings): Instance {
   const now = Date.now();
-  const base = defaultConfig();
+  const base: RatholeConfig = {
+    ...defaultConfig(),
+    bindAddr: settings.defaultBindAddr,
+    defaultToken: randomToken(),
+    transport: settings.defaultTransport,
+    heartbeatInterval: settings.defaultHeartbeatInterval,
+  };
   const config: RatholeConfig = {
     ...base,
     ...input.config,
     services: input.config?.services ?? [],
   };
+  if (!config.defaultToken?.trim()) config.defaultToken = randomToken();
   return {
     id: crypto.randomUUID(),
     name: input.name.trim() || "unnamed",
@@ -209,6 +217,12 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     return json({ ok: true }, 200, { "set-cookie": sessionCookie(req, "", 0) });
   }
 
+  // Session probing is expected before login, so report state in the body
+  // instead of generating a noisy 401 in the browser console.
+  if (path === "/api/session" && req.method === "GET") {
+    return json({ authenticated: await checkAdmin(req, env) });
+  }
+
   // ---- agent WebSocket (token = instance agentToken) --------------------
   if (path === "/api/agent/ws") {
     if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
@@ -234,12 +248,52 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
   // Everything below requires admin auth.
   if (!(await checkAdmin(req, env))) return unauthorized();
 
-  // ---- session check ----------------------------------------------------
-  if (path === "/api/session" && req.method === "GET") {
-    return json({ ok: true });
-  }
-
   const stub = hub(env);
+
+  // ---- global defaults ---------------------------------------------------
+  if (path === "/api/settings") {
+    if (req.method === "GET") {
+      return json({ settings: await stub.getSettings() });
+    }
+    if (req.method === "PUT") {
+      const current = await stub.getSettings();
+      const body = (await req.json().catch(() => ({}))) as Omit<
+        Partial<GlobalSettings>,
+        "defaultHeartbeatInterval"
+      > & { defaultHeartbeatInterval?: number | null };
+      const next: GlobalSettings = {
+        defaultBindAddr:
+          body.defaultBindAddr !== undefined
+            ? body.defaultBindAddr.trim()
+            : current.defaultBindAddr,
+        defaultTransport: body.defaultTransport ?? current.defaultTransport,
+        defaultHeartbeatInterval:
+          body.defaultHeartbeatInterval === null
+            ? undefined
+            : body.defaultHeartbeatInterval ?? current.defaultHeartbeatInterval,
+      };
+      if (!["tcp", "tls", "noise", "websocket"].includes(next.defaultTransport)) {
+        return json({ error: "invalid default transport" }, 400);
+      }
+      if (
+        next.defaultHeartbeatInterval !== undefined &&
+        (!Number.isFinite(next.defaultHeartbeatInterval) || next.defaultHeartbeatInterval <= 0)
+      ) {
+        return json({ error: "heartbeat interval must be greater than zero" }, 400);
+      }
+      const issues = validateConfig({
+        ...defaultConfig(),
+        bindAddr: next.defaultBindAddr,
+        transport: next.defaultTransport,
+        heartbeatInterval: next.defaultHeartbeatInterval,
+      });
+      if (issues.length > 0) {
+        return json({ error: "invalid global settings", issues }, 400);
+      }
+      return json({ settings: await stub.updateSettings(next) });
+    }
+    return json({ error: "method not allowed" }, 405);
+  }
 
   // ---- collection: /api/instances ---------------------------------------
   if (path === "/api/instances") {
@@ -249,7 +303,11 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     if (req.method === "POST") {
       const body = (await req.json().catch(() => ({}))) as CreateInstanceInput;
       if (!body.name?.trim()) return json({ error: "name is required" }, 400);
-      const inst = newInstance(body);
+      const inst = newInstance(body, await stub.getSettings());
+      const issues = validateConfig(inst.config);
+      if (issues.length > 0) {
+        return json({ error: "invalid configuration", issues }, 400);
+      }
       const view = await stub.createInstance(inst);
       return json({ instance: view }, 201);
     }
@@ -263,12 +321,6 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     const sub = itemMatch[2];
     const inst = await stub.getInstance(id);
     if (!inst) return json({ error: "not found" }, 404);
-
-    // /api/instances/:id/config → generated TOML + validation
-    if (sub === "/config" && req.method === "GET") {
-      const configs = generateConfigs(inst);
-      return json({ ...configs, issues: validateConfig(inst.config) });
-    }
 
     // /api/instances/:id/reveal → return the raw agent token (for setup)
     if (sub === "/reveal" && req.method === "GET") {
@@ -297,6 +349,10 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
             body.publicHost !== undefined ? body.publicHost.trim() || undefined : inst.publicHost,
           config: body.config ?? inst.config,
         };
+        const issues = validateConfig(updated.config);
+        if (issues.length > 0) {
+          return json({ error: "invalid configuration", issues }, 400);
+        }
         const view = await stub.updateInstance(updated);
         return json({ instance: view });
       }

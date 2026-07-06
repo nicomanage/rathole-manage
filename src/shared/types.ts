@@ -48,6 +48,12 @@ export interface RatholeConfig {
   services: RatholeService[];
 }
 
+export interface GlobalSettings {
+  defaultBindAddr: string;
+  defaultTransport: TransportType;
+  defaultHeartbeatInterval?: number;
+}
+
 export type InstanceStatus = "online" | "offline" | "unknown";
 /** Reported state of the rathole process managed by an agent. */
 export type ProcessState = "running" | "stopped" | "errored" | "unknown";
@@ -108,14 +114,11 @@ export type HubToAgent =
 
 /** Messages a browser dashboard client sends to the hub. */
 export type BrowserToHub =
-  | { type: "subscribe" }
   | { type: "subscribe_logs"; instanceId: string }
-  | { type: "unsubscribe_logs"; instanceId: string }
-  | { type: "command"; instanceId: string; command: AgentCommand };
+  | { type: "unsubscribe_logs"; instanceId: string };
 
 /** Messages the hub pushes to browser dashboard clients. */
 export type HubToBrowser =
-  | { type: "snapshot"; instances: InstanceView[] }
   | { type: "instance_update"; instance: InstanceView }
   | { type: "instance_removed"; instanceId: string }
   | { type: "log"; instanceId: string; line: string; stream?: "stdout" | "stderr"; ts: number }
@@ -133,10 +136,4 @@ export interface UpdateInstanceInput {
   name?: string;
   publicHost?: string;
   config?: RatholeConfig;
-}
-
-export interface GeneratedConfigs {
-  serverToml: string;
-  clientToml: string;
-  configHash: string;
 }

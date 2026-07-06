@@ -8,8 +8,10 @@ that embeds rathole as a library** and talks to the panel over **WebSocket**.
 From the panel you can:
 
 - register and manage **multiple rathole instances** in real time
-- edit the control channel + per-service forwarding and **generate `server.toml` / `client.toml`**
-- push config to a node, which its agent applies (rathole hot-reloads it)
+- set global defaults for newly created instances
+- edit the control channel + per-service forwarding and generate `client.toml`
+- let the Worker generate and push `server.toml`, which the agent applies automatically
+- auto-generate a default service token for each new instance
 - **start / stop / restart** the embedded rathole remotely
 - watch **live logs** and basic metrics (CPU, memory, uptime) streamed from each node
 
@@ -18,7 +20,7 @@ From the panel you can:
 ```
                        ┌──────────────────────────────────────────┐
    Browser (shadcn) ───┤  Cloudflare Worker            ASSETS ─────┼─ static SPA
-     WebSocket  ▲      │    /api/ws          (admin)               │
+       REST + WS ▲     │    /api/ws          (live updates/logs)   │
                │       │    /api/agent/ws    (agent token)         │
                ▼       │    /api/instances   (REST)                │
         ┌──────────────┴──────────────┐                            │
@@ -30,19 +32,22 @@ From the panel you can:
               ┌──────────────────┐                                 │
               │  rathole-agent   │  (Rust, on each server)         │
               │  ├─ embeds rathole::run() in-process               │
-              │  ├─ writes server.toml, hot-reload                 │
+              │  ├─ writes Worker-managed server.toml, hot-reload  │
               │  └─ streams logs + metrics back                    │
               └──────────────────┘
 ```
 
-- **`src/worker/`** — Worker entry (`index.ts`) + the `RatholeHub` Durable Object
-  (`hub.ts`). The hub holds every agent + browser socket using hibernatable
-  WebSockets, persists instances in DO storage, and fans updates out live.
+- **`src/worker/`** — Worker entry (`index.ts`), Worker-only server config
+  generation (`server-config.ts`), and the `RatholeHub` Durable Object (`hub.ts`).
+  The hub holds every agent + browser socket using hibernatable WebSockets,
+  persists instances/global settings in DO storage, and fans updates out live.
 - **`src/react-app/`** — the shadcn/ui dashboard.
-- **`src/shared/`** — types and the **rathole config generator**, used by both the
-  Worker and the browser (identical TOML output on both sides).
+- **`src/shared/`** — shared types, validation, and client config generation.
 - **`agent/`** — the Rust agent. It depends on the `rathole` crate and calls
   `rathole::run()` directly, so there is **no separate rathole binary** to install.
+
+The web panel uses REST for initial state, resynchronization, CRUD, settings, and
+commands. Its WebSocket is reserved for live status/metric deltas and log streams.
 
 ## Prerequisites
 
@@ -99,11 +104,12 @@ hot-reloads.
 
 ## Config model → rathole TOML
 
-Each instance has a control channel (`bind_addr`, `default_token`, transport:
-`tcp` / `tls` / `noise` / `websocket`) and a list of services. A service maps a
-public `bind_addr` on the server to a `local_addr` on the client behind NAT. The
-generator (`src/shared/config-generator.ts`) turns this into standard rathole
-`[server]` / `[server.services.*]` tables and a matching `client.toml`.
+Each instance has a control channel (`bind_addr`, an auto-generated
+`default_token`, transport: `tcp` / `tls` / `noise` / `websocket`) and a list of
+services. A service maps a public `bind_addr` on the server to a `local_addr` on
+the client behind NAT. `src/worker/server-config.ts` privately generates the
+Worker-managed `server.toml`; `src/shared/config-generator.ts` generates the
+operator-facing `client.toml`.
 
 ## Security notes
 

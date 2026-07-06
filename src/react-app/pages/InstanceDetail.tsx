@@ -4,10 +4,15 @@ import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
 import {
   generateClientToml,
-  generateServerToml,
   validateConfig,
 } from "@shared/config-generator";
-import type { InstanceView, RatholeConfig, RatholeService, TransportType } from "@shared/types";
+import type {
+  AgentCommand,
+  InstanceView,
+  RatholeConfig,
+  RatholeService,
+  TransportType,
+} from "@shared/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,6 +45,7 @@ import {
   MemoryStick,
   Clock,
   Tag,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -48,8 +54,22 @@ const TRANSPORTS: TransportType[] = ["tcp", "tls", "noise", "websocket"];
 export function InstanceDetail() {
   const { id = "" } = useParams();
   const nav = useNavigate();
-  const { instanceMap, command } = useHubSocket();
+  const { instanceMap, loading, loadError, refresh } = useHubSocket();
+  const [pendingCommand, setPendingCommand] = useState<AgentCommand | null>(null);
   const instance = instanceMap.get(id);
+
+  async function runCommand(command: AgentCommand) {
+    setPendingCommand(command);
+    try {
+      const { delivered } = await api.sendCommand(id, command);
+      if (delivered) toast.success(`${command} command sent`);
+      else toast.error("Agent is offline");
+    } catch (error) {
+      toast.error((error as Error).message);
+    } finally {
+      setPendingCommand(null);
+    }
+  }
 
   if (!instance) {
     return (
@@ -57,7 +77,24 @@ export function InstanceDetail() {
         <Button variant="ghost" size="sm" onClick={() => nav("/")}>
           <ArrowLeft className="h-4 w-4" /> Back
         </Button>
-        <p className="text-muted-foreground">Loading instance…</p>
+        {loading ? (
+          <p className="text-muted-foreground">Loading instance…</p>
+        ) : loadError ? (
+          <Card className="border-destructive/40">
+            <CardContent className="flex items-center justify-between gap-4 py-4">
+              <p className="flex items-center gap-2 text-sm text-destructive">
+                <AlertTriangle className="h-4 w-4" />
+                Failed to load instance: {loadError}
+              </p>
+              <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                <RefreshCw className="h-4 w-4" />
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <p className="text-muted-foreground">Instance not found.</p>
+        )}
       </div>
     );
   }
@@ -87,24 +124,24 @@ export function InstanceDetail() {
           <Button
             variant="outline"
             size="sm"
-            disabled={instance.status !== "online"}
-            onClick={() => command(id, "start")}
+            disabled={instance.status !== "online" || pendingCommand !== null}
+            onClick={() => void runCommand("start")}
           >
             <Play className="h-4 w-4" /> Start
           </Button>
           <Button
             variant="outline"
             size="sm"
-            disabled={instance.status !== "online"}
-            onClick={() => command(id, "restart")}
+            disabled={instance.status !== "online" || pendingCommand !== null}
+            onClick={() => void runCommand("restart")}
           >
             <RotateCw className="h-4 w-4" /> Restart
           </Button>
           <Button
             variant="outline"
             size="sm"
-            disabled={instance.status !== "online"}
-            onClick={() => command(id, "stop")}
+            disabled={instance.status !== "online" || pendingCommand !== null}
+            onClick={() => void runCommand("stop")}
           >
             <Square className="h-4 w-4" /> Stop
           </Button>
@@ -117,21 +154,16 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
-          <TabsTrigger value="files">Config files</TabsTrigger>
+          <TabsTrigger value="client">Client config</TabsTrigger>
           <TabsTrigger value="logs">Live logs</TabsTrigger>
           <TabsTrigger value="agent">Agent setup</TabsTrigger>
         </TabsList>
 
         <TabsContent value="config">
-          <ConfigEditor
-            id={id}
-            initial={instance.config}
-            name={instance.name}
-            publicHost={instance.publicHost}
-          />
+          <ConfigEditor id={id} initial={instance.config} />
         </TabsContent>
-        <TabsContent value="files">
-          <ConfigFiles config={instance.config} publicHost={instance.publicHost} name={instance.name} />
+        <TabsContent value="client">
+          <ClientConfig config={instance.config} publicHost={instance.publicHost} />
         </TabsContent>
         <TabsContent value="logs">
           <LogsPanel id={id} />
@@ -183,13 +215,9 @@ function formatUptime(s: number): string {
 function ConfigEditor({
   id,
   initial,
-  name,
-  publicHost,
 }: {
   id: string;
   initial: RatholeConfig;
-  name: string;
-  publicHost?: string;
 }) {
   const [config, setConfig] = useState<RatholeConfig>(structuredClone(initial));
   const [saving, setSaving] = useState(false);
@@ -410,46 +438,25 @@ function ConfigEditor({
           {saving ? "Saving…" : "Save & push"}
         </Button>
       </div>
-
-      {/* keep a live preview to reduce guesswork */}
-      <details className="rounded-lg border">
-        <summary className="cursor-pointer px-4 py-2 text-sm text-muted-foreground">
-          Preview generated server.toml for "{name}"
-          {publicHost ? ` (public host ${publicHost})` : ""}
-        </summary>
-        <div className="p-4 pt-0">
-          <CodeBlock code={generateServerToml(config, name)} language="toml" />
-        </div>
-      </details>
     </div>
   );
 }
 
-function ConfigFiles({
+function ClientConfig({
   config,
   publicHost,
-  name,
 }: {
   config: RatholeConfig;
   publicHost?: string;
-  name: string;
 }) {
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <div className="space-y-2">
-        <p className="text-sm font-medium">server.toml</p>
-        <p className="text-xs text-muted-foreground">
-          Runs on this node. The agent applies it automatically — download only if configuring by hand.
-        </p>
-        <CodeBlock code={generateServerToml(config, name)} filename="server.toml" />
-      </div>
-      <div className="space-y-2">
-        <p className="text-sm font-medium">client.toml</p>
-        <p className="text-xs text-muted-foreground">
-          Run this on the machine behind NAT to expose its local services.
-        </p>
-        <CodeBlock code={generateClientToml(config, publicHost)} filename="client.toml" />
-      </div>
+    <div className="max-w-3xl space-y-2">
+      <p className="text-sm font-medium">client.toml</p>
+      <p className="text-xs text-muted-foreground">
+        Run this on the machine behind NAT to expose its local services. The Worker manages and
+        pushes the server configuration automatically.
+      </p>
+      <CodeBlock code={generateClientToml(config, publicHost)} filename="client.toml" />
     </div>
   );
 }
@@ -530,7 +537,7 @@ function AgentSetup({ id, bindAddr }: { id: string; bindAddr: string }) {
           <p className="text-muted-foreground">
             The agent is a small Rust binary that depends on the <code className="font-mono">rathole</code>{" "}
             crate and runs the server <span className="font-medium">in-process</span>. It dials this hub over
-            WebSocket, applies the config the panel generates, and streams logs back. Source is in{" "}
+            WebSocket, applies the server config the Worker generates, and streams logs back. Source is in{" "}
             <code className="font-mono">/agent</code>.
           </p>
           <div className="flex items-center gap-3">

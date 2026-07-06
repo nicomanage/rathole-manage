@@ -15,12 +15,13 @@ import type {
   AgentCommand,
   AgentToHub,
   BrowserToHub,
+  GlobalSettings,
   HubToAgent,
   HubToBrowser,
   Instance,
   InstanceView,
 } from "@shared/types";
-import { generateServerToml, hashConfig } from "@shared/config-generator";
+import { generateServerToml, hashServerConfig } from "./server-config";
 
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
@@ -28,6 +29,10 @@ interface Env {
 }
 
 const OFFLINE_AFTER_MS = 45_000;
+const DEFAULT_SETTINGS: GlobalSettings = {
+  defaultBindAddr: "0.0.0.0:2333",
+  defaultTransport: "tcp",
+};
 
 /** Strip the agent token before sending an instance to a browser. */
 function toView(inst: Instance): InstanceView {
@@ -37,13 +42,24 @@ function toView(inst: Instance): InstanceView {
 
 export class RatholeHub extends DurableObject<Env> {
   private instances = new Map<string, Instance>();
+  private settings: GlobalSettings = { ...DEFAULT_SETTINGS };
   private loaded = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      const stored = await ctx.storage.list<Instance>({ prefix: "instance:" });
+      const [stored, settings] = await Promise.all([
+        ctx.storage.list<Instance>({ prefix: "instance:" }),
+        ctx.storage.get<GlobalSettings>("settings:global"),
+      ]);
       for (const inst of stored.values()) this.instances.set(inst.id, inst);
+      if (settings) {
+        this.settings = {
+          defaultBindAddr: settings.defaultBindAddr ?? DEFAULT_SETTINGS.defaultBindAddr,
+          defaultTransport: settings.defaultTransport ?? DEFAULT_SETTINGS.defaultTransport,
+          defaultHeartbeatInterval: settings.defaultHeartbeatInterval,
+        };
+      }
       this.loaded = true;
       // Re-evaluate liveness periodically via alarm.
       const alarm = await ctx.storage.getAlarm();
@@ -75,6 +91,16 @@ export class RatholeHub extends DurableObject<Env> {
 
   async getInstance(id: string): Promise<Instance | undefined> {
     return this.instances.get(id);
+  }
+
+  async getSettings(): Promise<GlobalSettings> {
+    return { ...this.settings };
+  }
+
+  async updateSettings(settings: GlobalSettings): Promise<GlobalSettings> {
+    this.settings = { ...settings };
+    await this.ctx.storage.put("settings:global", this.settings);
+    return { ...this.settings };
   }
 
   async createInstance(inst: Instance): Promise<InstanceView> {
@@ -137,8 +163,6 @@ export class RatholeHub extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server, ["browser"]);
-    // Send an initial snapshot once connected.
-    this.safeSend(server, { type: "snapshot", instances: [...this.instances.values()].map(toView) });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -263,12 +287,6 @@ export class RatholeHub extends DurableObject<Env> {
 
   private async handleBrowserMessage(ws: WebSocket, msg: BrowserToHub) {
     switch (msg.type) {
-      case "subscribe":
-        this.safeSend(ws, {
-          type: "snapshot",
-          instances: [...this.instances.values()].map(toView),
-        });
-        break;
       case "subscribe_logs":
         this.ctx.getTags(ws); // no-op; tags fixed at accept. Track via attachment.
         this.attachLogSub(ws, msg.instanceId, true);
@@ -276,13 +294,6 @@ export class RatholeHub extends DurableObject<Env> {
       case "unsubscribe_logs":
         this.attachLogSub(ws, msg.instanceId, false);
         break;
-      case "command": {
-        const inst = this.instances.get(msg.instanceId);
-        if (!inst) return;
-        const ok = await this.sendCommand(msg.instanceId, msg.command);
-        if (!ok) this.safeSend(ws, { type: "error", message: "agent offline" });
-        break;
-      }
     }
   }
 
@@ -299,7 +310,7 @@ export class RatholeHub extends DurableObject<Env> {
 
   private pushConfig(inst: Instance, only?: WebSocket) {
     const toml = generateServerToml(inst.config, inst.name);
-    const configHash = hashConfig(toml);
+    const configHash = hashServerConfig(toml);
     const msg: HubToAgent = { type: "apply_config", toml, configHash };
     const targets = only ? [only] : this.ctx.getWebSockets(`agent:${inst.id}`);
     for (const ws of targets) this.safeSend(ws, msg);

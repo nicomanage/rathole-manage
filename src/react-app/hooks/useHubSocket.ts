@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  AgentCommand,
   BrowserToHub,
   HubToBrowser,
   InstanceView,
 } from "@shared/types";
+import { api } from "@/lib/api";
 
 export interface LogLine {
   instanceId: string;
@@ -16,17 +16,36 @@ export interface LogLine {
 type ConnState = "connecting" | "open" | "closed";
 
 /**
- * Maintains a live WebSocket to the hub, keeping an up-to-date map of instances
- * and a rolling buffer of logs for whichever instance is subscribed.
+ * Loads queryable state through REST, then uses WebSocket only for live instance
+ * deltas and a rolling log stream for the subscribed instance.
  */
 export function useHubSocket() {
   const [instances, setInstances] = useState<Map<string, InstanceView>>(new Map());
   const [conn, setConn] = useState<ConnState>("connecting");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const logSubRef = useRef<string | null>(null);
   const retryRef = useRef(0);
   const closedRef = useRef(false);
+  const initialLoadSettledRef = useRef(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const { instances: loaded } = await api.listInstances();
+      setInstances(new Map(loaded.map((instance) => [instance.id, instance])));
+      setLoadError(null);
+    } catch (error) {
+      setLoadError((error as Error).message);
+      throw error;
+    } finally {
+      if (!initialLoadSettledRef.current) {
+        initialLoadSettledRef.current = true;
+        setLoading(false);
+      }
+    }
+  }, []);
 
   const send = useCallback((msg: BrowserToHub) => {
     const ws = wsRef.current;
@@ -34,6 +53,7 @@ export function useHubSocket() {
   }, []);
 
   const connect = useCallback(() => {
+    if (closedRef.current) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/ws`);
     wsRef.current = ws;
@@ -42,7 +62,7 @@ export function useHubSocket() {
     ws.onopen = () => {
       retryRef.current = 0;
       setConn("open");
-      ws.send(JSON.stringify({ type: "subscribe" } satisfies BrowserToHub));
+      void refresh().catch(() => undefined);
       if (logSubRef.current)
         ws.send(JSON.stringify({ type: "subscribe_logs", instanceId: logSubRef.current }));
     };
@@ -55,9 +75,6 @@ export function useHubSocket() {
         return;
       }
       switch (msg.type) {
-        case "snapshot":
-          setInstances(new Map(msg.instances.map((i) => [i.id, i])));
-          break;
         case "instance_update":
           setInstances((prev) => new Map(prev).set(msg.instance.id, msg.instance));
           break;
@@ -85,16 +102,17 @@ export function useHubSocket() {
       setTimeout(connect, delay);
     };
     ws.onerror = () => ws.close();
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     closedRef.current = false;
+    void refresh().catch(() => undefined);
     connect();
     return () => {
       closedRef.current = true;
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, refresh]);
 
   const subscribeLogs = useCallback(
     (instanceId: string) => {
@@ -112,18 +130,15 @@ export function useHubSocket() {
     logSubRef.current = null;
   }, [send]);
 
-  const command = useCallback(
-    (instanceId: string, cmd: AgentCommand) => send({ type: "command", instanceId, command: cmd }),
-    [send],
-  );
-
   return {
     instances: [...instances.values()].sort((a, b) => a.createdAt - b.createdAt),
     instanceMap: instances,
     conn,
+    loading,
+    loadError,
     logs,
     subscribeLogs,
     unsubscribeLogs,
-    command,
+    refresh,
   };
 }
