@@ -12,9 +12,9 @@
 
 mod enroll;
 mod logcap;
-mod probe;
 mod protocol;
 mod runner;
+mod svcstatus;
 mod sysstat;
 mod tui;
 
@@ -24,17 +24,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
+use tracing_subscriber::prelude::*;
 use url::Url;
 
 use logcap::ChannelMakeWriter;
-use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics, ServiceRef};
+use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics, ProcessState, ServiceRef};
 use runner::Runner;
+use svcstatus::ServiceStatus;
 
-/// Services the agent probes for reachability, updated on each config apply.
+/// The set of configured service names, updated on each config apply. Used to
+/// decide which services to report status for.
 type SharedServices = Arc<Mutex<Vec<ServiceRef>>>;
 
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
@@ -164,18 +166,34 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Probe every known service concurrently, returning name -> online.
-async fn probe_services(services: &SharedServices) -> Option<HashMap<String, bool>> {
-    let list = services.lock().await.clone();
-    if list.is_empty() {
+/// Report online state for every configured service, sourced from rathole's
+/// tracing events. A service is online only if rathole is running and its
+/// control channel is currently established.
+async fn collect_service_status(
+    services: &SharedServices,
+    status: &ServiceStatus,
+    state: ProcessState,
+) -> Option<HashMap<String, bool>> {
+    let names: Vec<String> = services
+        .lock()
+        .await
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    if names.is_empty() {
         return None;
     }
-    let checks = list.iter().map(|svc| {
-        let name = svc.name.clone();
-        let bind_addr = svc.bind_addr.clone();
-        async move { (name, probe::service_online(&bind_addr).await) }
-    });
-    Some(join_all(checks).await.into_iter().collect())
+    let running = matches!(state, ProcessState::Running);
+    let map = status.lock().unwrap();
+    Some(
+        names
+            .into_iter()
+            .map(|name| {
+                let online = running && map.get(&name).copied().unwrap_or(false);
+                (name, online)
+            })
+            .collect(),
+    )
 }
 
 fn build_ws_url(cfg: &RunConfig) -> Result<String> {
@@ -194,15 +212,23 @@ fn build_ws_url(cfg: &RunConfig) -> Result<String> {
 }
 
 async fn run_daemon() -> Result<()> {
-    // Route all tracing (agent + embedded rathole) into a channel for streaming.
+    // Per-service online state, derived from rathole's own tracing events.
+    let service_status: ServiceStatus = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // Route all tracing (agent + embedded rathole) into a channel for streaming,
+    // and into the service-status layer. Keep the filter at info or lower so
+    // rathole's "Control channel established/shutdown" events are observed.
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<String>();
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(ChannelMakeWriter::new(log_tx)),
         )
-        .with_writer(ChannelMakeWriter::new(log_tx))
+        .with(svcstatus::ServiceStatusLayer::new(service_status.clone()))
         .init();
 
     let cfg = resolve_run_config()?;
@@ -229,11 +255,12 @@ async fn run_daemon() -> Result<()> {
         });
     }
 
-    // Periodic status + metrics + per-service reachability.
+    // Periodic status + metrics + per-service online state.
     {
         let to_hub_tx = to_hub_tx.clone();
         let runner = runner.clone();
         let services = services.clone();
+        let service_status = service_status.clone();
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
@@ -250,11 +277,11 @@ async fn run_daemon() -> Result<()> {
                     hostname: hostname.clone(),
                     config_in_sync: None,
                 };
-                let service_status = probe_services(&services).await;
+                let statuses = collect_service_status(&services, &service_status, state).await;
                 let msg = AgentToHub::Status {
                     process_state: state,
                     metrics: Some(metrics),
-                    service_status,
+                    service_status: statuses,
                 };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
