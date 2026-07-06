@@ -17,5 +17,6 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/worker", "src/shared", "worker-configuration.d.ts"]
+  "include": ["src/worker", "src/shared", "worker-configuration.d.ts"],
+  "exclude": ["**/*.test.ts"]
 }

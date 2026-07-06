@@ -162,3 +162,25 @@ pub fn identity_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| "/var/lib/rathole-manage/identity.json".to_string())
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::http_origin;
+
+    #[test]
+    fn normalizes_schemes_and_strips_path() {
+        assert_eq!(
+            http_origin("https://panel.example.com/api/agent/ws").unwrap(),
+            "https://panel.example.com"
+        );
+        assert_eq!(http_origin("wss://h.example.com:8443/x").unwrap(), "https://h.example.com:8443");
+        assert_eq!(http_origin("ws://h.example.com:2333").unwrap(), "http://h.example.com:2333");
+        assert_eq!(http_origin("http://127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(http_origin("not a url").is_err());
+        assert!(http_origin("https://").is_err());
+    }
+}

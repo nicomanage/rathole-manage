@@ -441,3 +441,31 @@ async fn handle_hub_message(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(hub_base: &str) -> RunConfig {
+        RunConfig {
+            hub_base: hub_base.to_string(),
+            instance_id: "abc".to_string(),
+            agent_token: "tok".to_string(),
+            config_path: PathBuf::from("/tmp/server.toml"),
+        }
+    }
+
+    #[test]
+    fn ws_url_uses_wss_for_https_and_carries_credentials() {
+        let url = build_ws_url(&cfg("https://panel.example.com:8443")).unwrap();
+        assert!(url.starts_with("wss://panel.example.com:8443/api/agent/ws?"));
+        assert!(url.contains("instance=abc"));
+        assert!(url.contains("token=tok"));
+    }
+
+    #[test]
+    fn ws_url_uses_ws_for_http() {
+        let url = build_ws_url(&cfg("http://127.0.0.1:8787")).unwrap();
+        assert!(url.starts_with("ws://127.0.0.1:8787/api/agent/ws?"));
+    }
+}

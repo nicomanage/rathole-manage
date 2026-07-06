@@ -1,0 +1,33 @@
+name: web-ci
+
+# Typecheck, unit-test, and build the panel (Worker + React SPA).
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths-ignore:
+      - "agent/**"
+  pull_request:
+    paths-ignore:
+      - "agent/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: check + test + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Generate Worker types
+        run: npm run cf-typegen
+      - name: Typecheck
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
