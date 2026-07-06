@@ -80,9 +80,29 @@ first deploy.
 
 ## Connect a rathole node (Rust agent)
 
-Nodes **self-enroll** — you don't create instances in the panel. On the server,
-build the agent and run its interactive `login`, signing in with your panel
-account:
+Nodes **self-enroll** — you don't create instances in the panel.
+
+### Install via APT (recommended)
+
+The CI publishes signed-off `.deb` packages (amd64 + arm64) to an APT repo on
+GitHub Pages:
+
+```bash
+echo "deb [trusted=yes] https://<owner>.github.io/<repo>/apt ./" \
+  | sudo tee /etc/apt/sources.list.d/rathole-agent.list
+sudo apt-get update
+sudo apt-get install rathole-agent
+
+# enroll this node with your panel account, then start it:
+sudo rathole-agent login
+sudo systemctl enable --now rathole-agent
+```
+
+The install page (with the exact URL for this repo) is the GitHub Pages site
+itself. Publishing is done by `.github/workflows/apt-pages.yml`; enable it once
+under **Settings → Pages → Build and deployment → GitHub Actions**.
+
+### Build from source
 
 ```bash
 cd agent

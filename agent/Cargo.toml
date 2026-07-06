@@ -2,6 +2,7 @@
 name = "rathole-agent"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Rust agent that embeds rathole and connects a node to the rathole-manage control plane over WebSocket."
 
 [[bin]]
@@ -41,3 +42,25 @@ openssl = { version = "0.10", features = ["vendored"] }
 [profile.release]
 strip = true
 lto = "thin"
+
+# ---- Debian packaging (cargo-deb) ------------------------------------------
+[package.metadata.deb]
+maintainer = "rathole-manage <qwe7002.ai@gmail.com>"
+copyright = "2026, rathole-manage contributors"
+extended-description = """\
+Agent for the rathole-manage control panel. Embeds the rathole reverse proxy as \
+a library and runs it in-process, connecting back to the panel over WebSocket to \
+apply generated config, stream logs/metrics, and accept start/stop/restart. \
+Enroll a node with `rathole-agent login`."""
+section = "net"
+priority = "optional"
+# Set explicitly (rather than $auto) so cross-arch packages build without
+# dpkg-shlibdeps needing the foreign architecture's libraries on the runner.
+depends = "libc6, libgcc-s1"
+assets = [
+    ["target/release/rathole-agent", "usr/bin/", "755"],
+    ["rathole-agent.service", "lib/systemd/system/rathole-agent.service", "644"],
+    ["agent.env.example", "usr/share/doc/rathole-agent/agent.env.example", "644"],
+    ["../README.md", "usr/share/doc/rathole-agent/README.md", "644"],
+]
+maintainer-scripts = "debian/"

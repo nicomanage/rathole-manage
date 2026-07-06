@@ -1,0 +1,164 @@
+name: apt-pages
+
+# Builds .deb packages of the agent (amd64 + arm64) and publishes a flat APT
+# repository to GitHub Pages, so nodes can install with:
+#
+#   echo "deb [trusted=yes] https://<owner>.github.io/<repo>/apt ./" \
+#     | sudo tee /etc/apt/sources.list.d/rathole-agent.list
+#   sudo apt-get update && sudo apt-get install rathole-agent
+#
+# Enable Pages first: repo Settings → Pages → Build and deployment → GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*", "agent-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: agent
+
+jobs:
+  deb:
+    name: deb ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            cross: false
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: deb-${{ matrix.target }}
+
+      - name: Install tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb${{ matrix.cross && ',cross' || '' }}
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      - name: Package .deb
+        # Binary is already stripped at link time (profile.release strip=true),
+        # so skip cargo-deb's strip which can't run on a cross-built binary.
+        run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
+
+      - name: Collect
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/debs"
+          cp target/${{ matrix.target }}/debian/*.deb "$GITHUB_WORKSPACE/debs/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: debs/*.deb
+          if-no-files-found: error
+
+  pages:
+    name: publish apt repo
+    needs: deb
+    runs-on: ubuntu-latest
+    # Override the workflow-level `agent` working dir; this job operates at root.
+    defaults:
+      run:
+        working-directory: .
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download debs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: debs
+          merge-multiple: true
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build flat APT repo + landing page
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils
+
+          mkdir -p site/apt
+          cp debs/*.deb site/apt/
+
+          pushd site/apt
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -9 -k -f Packages
+          apt-ftparchive release . > Release
+          popd
+
+          # Landing page with copy-paste install instructions.
+          cat > site/index.html <<HTML
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>rathole-agent APT repository</title>
+          <style>
+            body{font-family:system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem;line-height:1.6;color:#111}
+            code,pre{font-family:ui-monospace,Menlo,Consolas,monospace}
+            pre{background:#0d1117;color:#e6edf3;padding:1rem;border-radius:.5rem;overflow-x:auto}
+            h1{font-size:1.6rem} a{color:#0969da}
+            @media(prefers-color-scheme:dark){body{background:#0b0e14;color:#e6edf3}}
+          </style></head><body>
+          <h1>rathole-agent — APT repository</h1>
+          <p>Install the <a href="https://github.com/${GITHUB_REPOSITORY}">rathole-manage</a> agent
+          (embeds rathole) on Debian/Ubuntu, amd64 or arm64:</p>
+          <pre><code>echo "deb [trusted=yes] ${BASE_URL}apt ./" \\
+            | sudo tee /etc/apt/sources.list.d/rathole-agent.list
+          sudo apt-get update
+          sudo apt-get install rathole-agent
+
+          # then enroll this node with your panel account:
+          sudo rathole-agent login
+          sudo systemctl enable --now rathole-agent</code></pre>
+          <p>Or download a package directly from <a href="apt/">the pool</a>.</p>
+          </body></html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

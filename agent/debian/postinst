@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Pick up the freshly installed unit; do not enable/start yet because the
+    # node must be enrolled first (`rathole-agent login`).
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    echo "rathole-agent installed."
+    echo "  1) Enroll this node:  sudo rathole-agent login"
+    echo "  2) Start the service: sudo systemctl enable --now rathole-agent"
+fi
+
+exit 0
