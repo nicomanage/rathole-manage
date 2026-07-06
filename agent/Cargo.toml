@@ -22,3 +22,13 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+
+# rathole's build pulls openssl-sys transitively (vergen -> git2). We don't use
+# openssl directly, but enabling its `vendored` feature makes openssl-sys build
+# a static OpenSSL from source, so the agent cross-compiles cleanly for musl /
+# aarch64 in CI without needing a system OpenSSL for each target.
+openssl = { version = "0.10", features = ["vendored"] }
+
+[profile.release]
+strip = true
+lto = "thin"
