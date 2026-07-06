@@ -22,8 +22,16 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new ApiError(res.status, body.error ?? res.statusText);
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      issues?: Array<{ message?: string }>;
+    };
+    const details = body.issues
+      ?.map((issue) => issue.message)
+      .filter(Boolean)
+      .join(" ");
+    const message = [body.error ?? res.statusText, details].filter(Boolean).join(": ");
+    throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

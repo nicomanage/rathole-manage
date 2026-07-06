@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/dialog";
 import { CodeBlock } from "@/components/CodeBlock";
 import { StatusDot, ProcessBadge } from "@/components/StatusBadge";
-import { relativeTime } from "@/lib/utils";
+import { cn, relativeTime } from "@/lib/utils";
 import {
   ArrowLeft,
   Play,
@@ -222,6 +222,10 @@ function ConfigEditor({
   const [config, setConfig] = useState<RatholeConfig>(structuredClone(initial));
   const [saving, setSaving] = useState(false);
   const issues = useMemo(() => validateConfig(config), [config]);
+  const issueByPath = useMemo(
+    () => new Map(issues.map((issue) => [issue.path, issue.message])),
+    [issues],
+  );
   const dirty = useMemo(
     () => JSON.stringify(config) !== JSON.stringify(initial),
     [config, initial],
@@ -290,10 +294,14 @@ function ConfigEditor({
           <div className="space-y-2">
             <Label>Bind address</Label>
             <Input
-              className="font-mono"
+              aria-invalid={issueByPath.has("bindAddr")}
+              className={cn("font-mono", issueByPath.has("bindAddr") && "border-destructive")}
               value={config.bindAddr}
               onChange={(e) => patch({ bindAddr: e.target.value })}
             />
+            {issueByPath.has("bindAddr") && (
+              <p className="text-xs text-destructive">{issueByPath.get("bindAddr")}</p>
+            )}
           </div>
           <div className="space-y-2">
             <Label>Default token</Label>
@@ -346,75 +354,82 @@ function ConfigEditor({
               No services. Add one to forward a port from behind NAT.
             </p>
           )}
-          {config.services.map((svc, i) => (
-            <div key={i} className="rounded-lg border p-4">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Name</Label>
-                  <Input
-                    className="font-mono"
-                    value={svc.name}
-                    onChange={(e) => updateService(i, { name: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Type</Label>
-                  <Select value={svc.type} onValueChange={(v) => updateService(i, { type: v as "tcp" | "udp" })}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="tcp">tcp</SelectItem>
-                      <SelectItem value="udp">udp</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Public bind (server)</Label>
-                  <Input
-                    className="font-mono"
-                    value={svc.bindAddr}
-                    onChange={(e) => updateService(i, { bindAddr: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Local addr (client)</Label>
-                  <Input
-                    className="font-mono"
-                    placeholder="127.0.0.1:22"
-                    value={svc.clientLocalAddr ?? ""}
-                    onChange={(e) => updateService(i, { clientLocalAddr: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Token (optional)</Label>
-                  <Input
-                    className="font-mono"
-                    placeholder="inherits default"
-                    value={svc.token ?? ""}
-                    onChange={(e) => updateService(i, { token: e.target.value })}
-                  />
-                </div>
-                <div className="flex items-center gap-2 pt-6">
-                  <Switch
-                    checked={!!svc.nodelay}
-                    onCheckedChange={(v) => updateService(i, { nodelay: v })}
-                  />
-                  <Label className="text-xs">nodelay</Label>
-                </div>
-                <div className="flex items-end justify-end pt-6 lg:col-span-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => removeService(i)}
-                  >
-                    <Trash2 className="h-4 w-4" /> Remove
-                  </Button>
+          {config.services.map((svc, i) => {
+            const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
+            return (
+              <div key={i} className="rounded-lg border p-4">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Name</Label>
+                    <Input
+                      className="font-mono"
+                      value={svc.name}
+                      onChange={(e) => updateService(i, { name: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Type</Label>
+                    <Select value={svc.type} onValueChange={(v) => updateService(i, { type: v as "tcp" | "udp" })}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="tcp">tcp</SelectItem>
+                        <SelectItem value="udp">udp</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Public bind (server)</Label>
+                    <Input
+                      aria-invalid={!!publicBindIssue}
+                      className={cn("font-mono", publicBindIssue && "border-destructive")}
+                      value={svc.bindAddr}
+                      onChange={(e) => updateService(i, { bindAddr: e.target.value })}
+                    />
+                    {publicBindIssue && (
+                      <p className="text-xs text-destructive">{publicBindIssue}</p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Local addr (client)</Label>
+                    <Input
+                      className="font-mono"
+                      placeholder="127.0.0.1:22"
+                      value={svc.clientLocalAddr ?? ""}
+                      onChange={(e) => updateService(i, { clientLocalAddr: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Token (optional)</Label>
+                    <Input
+                      className="font-mono"
+                      placeholder="inherits default"
+                      value={svc.token ?? ""}
+                      onChange={(e) => updateService(i, { token: e.target.value })}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 pt-6">
+                    <Switch
+                      checked={!!svc.nodelay}
+                      onCheckedChange={(v) => updateService(i, { nodelay: v })}
+                    />
+                    <Label className="text-xs">nodelay</Label>
+                  </div>
+                  <div className="flex items-end justify-end pt-6 lg:col-span-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => removeService(i)}
+                    >
+                      <Trash2 className="h-4 w-4" /> Remove
+                    </Button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </CardContent>
       </Card>
 
