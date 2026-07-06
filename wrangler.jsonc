@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rathole-manage",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2025-01-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RATHOLE_HUB",
+        "class_name": "RatholeHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RatholeHub"]
+    }
+  ],
+  "vars": {
+    // Change this in production via `wrangler secret put ADMIN_TOKEN`.
+    // Left here only as a dev default.
+    "ADMIN_TOKEN": "change-me-admin-token"
+  }
+}

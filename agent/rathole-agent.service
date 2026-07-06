@@ -1,0 +1,24 @@
+# systemd unit for the rathole-manage agent.
+# Install to /etc/systemd/system/rathole-agent.service, then:
+#   systemctl daemon-reload && systemctl enable --now rathole-agent
+#
+# Put the connection settings in /etc/rathole-manage/agent.env (see agent.env.example).
+
+[Unit]
+Description=rathole-manage agent (embeds rathole)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rathole-manage/agent.env
+ExecStart=/usr/local/bin/rathole-agent
+Restart=always
+RestartSec=5
+# rathole needs to bind low ports for services; grant the capability instead of root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+StateDirectory=rathole-manage
+
+[Install]
+WantedBy=multi-user.target
