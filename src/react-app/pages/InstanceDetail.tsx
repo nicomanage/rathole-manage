@@ -306,7 +306,7 @@ function MonthlyTraffic({
 function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }) {
   const map = {
     online: { cls: "bg-success", title: "Online — a client is connected" },
-    offline: { cls: "bg-muted-foreground/40", title: "Offline — no client connected" },
+    offline: { cls: "bg-yellow-500", title: "Waiting — running, no client connected" },
     unknown: { cls: "bg-muted-foreground/25", title: "Unknown (node offline or unsaved)" },
   } as const;
   const { cls, title } = map[state];
