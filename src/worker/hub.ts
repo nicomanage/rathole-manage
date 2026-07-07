@@ -155,7 +155,7 @@ export class RatholeHub extends DurableObject<Env> {
     await this.ctx.storage.put(`user:${user.id}`, user);
   }
 
-  /** Seed the first admin (from env) only when there are no users yet. */
+  /** Seed the first admin only when there are no users yet. */
   async bootstrapAdmin(user: User): Promise<boolean> {
     if (this.users.size > 0) return false;
     await this.putUser(user);

@@ -9,7 +9,7 @@
 
 import { RatholeHub } from "./hub";
 import { defaultConfig, validateConfig } from "@shared/config-generator";
-import { DEFAULT_ITERATIONS, hashPassword, verifyPassword } from "./passwords";
+import { hashPassword, verifyPassword } from "./passwords";
 import type {
   AgentCommand,
   CreateInstanceInput,
@@ -29,9 +29,6 @@ export { RatholeHub };
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
   ASSETS: Fetcher;
-  /** Bootstrap admin — seeds the first user if none exist yet. */
-  ADMIN_USERNAME: string;
-  ADMIN_PASSWORD: string;
   SESSION_SECRET: string;
 }
 
@@ -145,27 +142,6 @@ async function authenticate(
   return (await stub.getUserByUsername(username)) ?? null;
 }
 
-/** Seed the first admin from env credentials when the user store is empty. */
-async function ensureBootstrap(env: Env, stub: DurableObjectStub<RatholeHub>): Promise<void> {
-  if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD) return;
-  if ((await stub.countUsers()) > 0) {
-    const admin = await stub.getUserByUsername(env.ADMIN_USERNAME);
-    if (admin && admin.passwordIterations > DEFAULT_ITERATIONS) {
-      await stub.updateUser(admin.id, { password: await hashPassword(env.ADMIN_PASSWORD) });
-    }
-    return;
-  }
-  const now = Date.now();
-  await stub.bootstrapAdmin({
-    id: crypto.randomUUID(),
-    username: env.ADMIN_USERNAME,
-    ...(await hashPassword(env.ADMIN_PASSWORD)),
-    role: "admin",
-    createdAt: now,
-    updatedAt: now,
-  });
-}
-
 function forbidden(): Response {
   return json({ error: "forbidden" }, 403);
 }
@@ -239,12 +215,30 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     if (!env.SESSION_SECRET) {
       return json({ error: "SESSION_SECRET is not configured" }, 500);
     }
-    await ensureBootstrap(env, stub);
     const body = (await req.json().catch(() => ({}))) as {
       username?: string;
       password?: string;
     };
-    const user = await stub.getUserByUsername(body.username ?? "");
+
+    const username = validateUsername(body.username);
+    const password = body.password ?? "";
+    if ((await stub.countUsers()) === 0) {
+      if (!username) return json({ error: "invalid username" }, 400);
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        return json({ error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` }, 400);
+      }
+      const now = Date.now();
+      await stub.bootstrapAdmin({
+        id: crypto.randomUUID(),
+        username,
+        ...(await hashPassword(password)),
+        role: "admin",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    const user = username ? await stub.getUserByUsername(username) : undefined;
     const ok = user ? await verifyPassword(body.password ?? "", user) : false;
     if (!user || !ok) return unauthorized();
     const session = await createSession(env, user.username);

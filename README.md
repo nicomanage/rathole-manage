@@ -59,18 +59,17 @@ commands. Its WebSocket is reserved for live status/metric deltas and log stream
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # set username, password, and session secret
+cp .dev.vars.example .dev.vars   # set the session secret
 npm run dev                      # Vite + Worker via @cloudflare/vite-plugin
 ```
 
-Open the printed URL and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+Open the printed URL. When the user store is empty, the first username and
+password you submit becomes the initial admin account.
 
 ## Deploy the panel
 
 ```bash
 npm run cf-typegen               # generate worker types (first time / after config changes)
-npx wrangler secret put ADMIN_USERNAME
-npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put SESSION_SECRET
 npm run deploy
 ```
@@ -139,10 +138,10 @@ operator-facing `client.toml`.
 ## Security notes
 
 - The panel supports **multiple users** with `admin` / `viewer` roles, managed
-  under **Users** (admin only). Passwords are stored as PBKDF2-SHA256 hashes; the
-  `ADMIN_USERNAME` / `ADMIN_PASSWORD` env only bootstraps the first admin when the
-  user store is empty. Viewers get read-only access; only admins mutate instances,
-  settings, and users.
+  under **Users** (admin only). Passwords are stored as PBKDF2-SHA256 hashes. The
+  first successful login initializes the first admin account when the user store
+  is empty. Viewers get read-only access; only admins mutate instances, settings,
+  and users.
 - Login uses an HMAC-signed, `HttpOnly`, `SameSite=Strict`, `Secure` session
   cookie. Credentials are never placed in a WebSocket URL or browser storage.
 - Each instance has its own random `agentToken`; agents authenticate with it and
