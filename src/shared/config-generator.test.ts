@@ -72,6 +72,11 @@ describe("generateServerToml", () => {
     );
     expect(toml).toContain('[server.services."my nas"]');
   });
+
+  it("emits an empty services map when no services are configured", () => {
+    const toml = generateServerToml(config({ services: [] }));
+    expect(toml).toContain("services = {}");
+  });
 });
 
 describe("generateClientToml", () => {

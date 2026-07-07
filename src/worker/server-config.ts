@@ -51,6 +51,7 @@ export function generateServerToml(config: RatholeConfig, instanceName?: string)
   if (typeof config.heartbeatInterval === "number") {
     out.push(`heartbeat_interval = ${config.heartbeatInterval}`);
   }
+  if (config.services.length === 0) out.push("services = {}");
   out.push("");
 
   if (config.transport && config.transport !== "tcp") {

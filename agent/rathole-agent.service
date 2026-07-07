@@ -15,7 +15,7 @@ Wants=network-online.target
 Type=simple
 # EnvironmentFile is optional; the daemon reads its identity file by default.
 EnvironmentFile=-/etc/rathole-manage/agent.env
-ExecStart=/usr/local/bin/rathole-agent run
+ExecStart=/usr/bin/rathole-agent run
 Restart=always
 RestartSec=5
 # rathole needs to bind low ports for services; grant the capability instead of root.
