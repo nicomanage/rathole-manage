@@ -9,7 +9,7 @@ From the panel you can:
 
 - register and manage **multiple rathole instances** in real time
 - set global defaults for newly created instances
-- edit the control channel + per-service forwarding and generate `client.toml`
+- edit the server control channel + public service forwarding
 - let the Worker push typed server config, which the agent applies directly to embedded rathole
 - auto-generate a default service token for each new instance
 - **start / stop / restart** the embedded rathole remotely
@@ -134,11 +134,10 @@ and `AGENT_TOKEN` in the environment instead (see `agent/agent.env.example`).
 
 Each instance has a control channel (`bind_addr`, an auto-generated
 `default_token`, transport: `tcp` / `tls` / `noise` / `websocket`) and a list of
-services. A service maps a public `bind_addr` on the server to a `local_addr` on
-the client behind NAT. The Worker sends the server-side model to the agent as
-structured JSON; the agent converts it to rathole's typed config and calls the
-patched embedded API directly. `src/shared/config-generator.ts` still generates
-the operator-facing `client.toml`.
+services. A service maps a public `bind_addr` on the server. Client-side
+`local_addr` and `client.toml` are managed outside this panel. The Worker sends
+the server-side model to the agent as structured JSON; the agent converts it to
+rathole's typed config and calls the patched embedded API directly.
 
 ## Security notes
 

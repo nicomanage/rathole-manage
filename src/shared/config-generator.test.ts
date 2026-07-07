@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultConfig, generateClientToml, validateConfig } from "./config-generator";
+import { defaultConfig, validateConfig } from "./config-generator";
 import { hashServerConfig } from "../worker/server-config";
 import type { RatholeConfig } from "./types";
 
@@ -10,7 +10,7 @@ function config(overrides: Partial<RatholeConfig> = {}): RatholeConfig {
     defaultToken: "secret",
     transport: "tcp",
     services: [
-      { name: "ssh", type: "tcp", bindAddr: "0.0.0.0:5202", clientLocalAddr: "127.0.0.1:22" },
+      { name: "ssh", type: "tcp", bindAddr: "0.0.0.0:5202" },
     ],
     ...overrides,
   };
@@ -53,15 +53,6 @@ describe("validateConfig", () => {
       config({ services: [{ name: "s", type: "tcp", bindAddr: "oops" }] }),
     );
     expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
-  });
-});
-
-describe("generateClientToml", () => {
-  it("uses the public host and a sensible local default", () => {
-    const toml = generateClientToml(config(), "tunnel.example.com");
-    expect(toml).toContain('remote_addr = "tunnel.example.com:2333"');
-    expect(toml).toContain("[client.services.ssh]");
-    expect(toml).toContain('local_addr = "127.0.0.1:22"');
   });
 });
 

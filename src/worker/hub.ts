@@ -48,6 +48,9 @@ const DEFAULT_SETTINGS: GlobalSettings = {
   defaultBindAddr: "0.0.0.0:2333",
   defaultTransport: "tcp",
 };
+const LOG_BUFFER_LIMIT = 300;
+
+type LogEntry = Extract<HubToBrowser, { type: "log" }>;
 
 /** Strip the agent token before sending an instance to a browser. */
 function toView(inst: Instance): InstanceView {
@@ -58,6 +61,7 @@ function toView(inst: Instance): InstanceView {
 export class RatholeHub extends DurableObject<Env> {
   private instances = new Map<string, Instance>();
   private users = new Map<string, User>();
+  private logBuffers = new Map<string, LogEntry[]>();
   private settings: GlobalSettings = { ...DEFAULT_SETTINGS };
   private loaded = false;
 
@@ -366,7 +370,7 @@ export class RatholeHub extends DurableObject<Env> {
         break;
       }
       case "log": {
-        this.broadcastLogs(instanceId, {
+        this.pushLog({
           type: "log",
           instanceId,
           line: msg.line,
@@ -386,7 +390,7 @@ export class RatholeHub extends DurableObject<Env> {
         inst.lastSeen = Date.now();
         break;
       case "command_result":
-        this.broadcastLogs(instanceId, {
+        this.pushLog({
           type: "log",
           instanceId,
           line: `[agent] command ${msg.command} → ${msg.ok ? "ok" : "failed: " + msg.error}`,
@@ -401,6 +405,7 @@ export class RatholeHub extends DurableObject<Env> {
       case "subscribe_logs":
         this.ctx.getTags(ws); // no-op; tags fixed at accept. Track via attachment.
         this.attachLogSub(ws, msg.instanceId, true);
+        for (const entry of this.logBuffers.get(msg.instanceId) ?? []) this.safeSend(ws, entry);
         break;
       case "unsubscribe_logs":
         this.attachLogSub(ws, msg.instanceId, false);
@@ -429,6 +434,14 @@ export class RatholeHub extends DurableObject<Env> {
 
   private broadcastBrowsers(msg: HubToBrowser) {
     for (const ws of this.ctx.getWebSockets("browser")) this.safeSend(ws, msg);
+  }
+
+  private pushLog(msg: LogEntry) {
+    const buffer = this.logBuffers.get(msg.instanceId) ?? [];
+    buffer.push(msg);
+    if (buffer.length > LOG_BUFFER_LIMIT) buffer.splice(0, buffer.length - LOG_BUFFER_LIMIT);
+    this.logBuffers.set(msg.instanceId, buffer);
+    this.broadcastLogs(msg.instanceId, msg);
   }
 
   private broadcastLogs(instanceId: string, msg: HubToBrowser) {

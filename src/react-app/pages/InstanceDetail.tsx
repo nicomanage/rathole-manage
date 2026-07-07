@@ -2,10 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
-import {
-  generateClientToml,
-  validateConfig,
-} from "@shared/config-generator";
+import { validateConfig } from "@shared/config-generator";
 import type {
   AgentCommand,
   InstanceView,
@@ -166,7 +163,6 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
-          <TabsTrigger value="client">Client config</TabsTrigger>
           <TabsTrigger value="logs">Live logs</TabsTrigger>
           <TabsTrigger value="agent">Agent setup</TabsTrigger>
         </TabsList>
@@ -179,9 +175,6 @@ export function InstanceDetail() {
             online={instance.status === "online"}
             canEdit={isAdmin}
           />
-        </TabsContent>
-        <TabsContent value="client">
-          <ClientConfig config={instance.config} publicHost={instance.publicHost} />
         </TabsContent>
         <TabsContent value="logs">
           <LogsPanel id={id} />
@@ -296,7 +289,6 @@ function ConfigEditor({
           name: `service_${c.services.length + 1}`,
           type: "tcp",
           bindAddr: "0.0.0.0:5000",
-          clientLocalAddr: "127.0.0.1:8080",
         },
       ],
     }));
@@ -413,7 +405,6 @@ function ConfigEditor({
                   <TableHead className="min-w-32">Name</TableHead>
                   <TableHead className="w-24">Type</TableHead>
                   <TableHead className="min-w-40">Public bind (server)</TableHead>
-                  <TableHead className="min-w-40">Local addr (client)</TableHead>
                   <TableHead className="min-w-36">Token</TableHead>
                   <TableHead className="w-20 text-center">nodelay</TableHead>
                   {canEdit && <TableHead className="w-12" />}
@@ -461,15 +452,6 @@ function ConfigEditor({
                         {publicBindIssue && (
                           <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <Input
-                          className="h-8 font-mono"
-                          placeholder="127.0.0.1:22"
-                          value={svc.clientLocalAddr ?? ""}
-                          disabled={!canEdit}
-                          onChange={(e) => updateService(i, { clientLocalAddr: e.target.value })}
-                        />
                       </TableCell>
                       <TableCell>
                         <Input
@@ -535,25 +517,6 @@ function ConfigEditor({
   );
 }
 
-function ClientConfig({
-  config,
-  publicHost,
-}: {
-  config: RatholeConfig;
-  publicHost?: string;
-}) {
-  return (
-    <div className="max-w-3xl space-y-2">
-      <p className="text-sm font-medium">client.toml</p>
-      <p className="text-xs text-muted-foreground">
-        Run this on the machine behind NAT to expose its local services. The Worker manages and
-        pushes the server configuration automatically.
-      </p>
-      <CodeBlock code={generateClientToml(config, publicHost)} filename="client.toml" />
-    </div>
-  );
-}
-
 function LogsPanel({ id }: { id: string }) {
   const { logs, subscribeLogs, unsubscribeLogs } = useHubSocket();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -576,7 +539,7 @@ function LogsPanel({ id }: { id: string }) {
         <div ref={scrollRef} className="h-[420px] overflow-y-auto p-4 font-mono text-xs leading-relaxed">
           {filtered.length === 0 ? (
             <p className="text-muted-foreground">
-              Waiting for logs… the agent streams rathole output here in real time.
+              Waiting for logs… recent agent and rathole output appears here.
             </p>
           ) : (
             filtered.map((l, i) => (

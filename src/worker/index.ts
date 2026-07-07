@@ -193,7 +193,6 @@ function newInstance(
   return {
     id: crypto.randomUUID(),
     name: input.name.trim() || "unnamed",
-    publicHost: input.publicHost?.trim() || undefined,
     agentToken: randomToken(),
     enrollNodeId,
     config,
@@ -290,7 +289,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
 
     const name = body.name?.trim() || `node-${nodeId.slice(0, 8)}`;
     const inst = newInstance(
-      { name, publicHost: body.publicHost?.trim() || undefined },
+      { name },
       await stub.getSettings(),
       nodeId,
     );
@@ -502,8 +501,6 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
         const updated: Instance = {
           ...inst,
           name: body.name?.trim() || inst.name,
-          publicHost:
-            body.publicHost !== undefined ? body.publicHost.trim() || undefined : inst.publicHost,
           config: body.config ?? inst.config,
         };
         const issues = validateConfig(updated.config);

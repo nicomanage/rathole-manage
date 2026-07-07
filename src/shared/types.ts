@@ -14,8 +14,6 @@ export interface RatholeService {
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;
   nodelay?: boolean;
-  /** The local address the *client* forwards to, used to generate client.toml. */
-  clientLocalAddr?: string;
 }
 
 export interface TlsConfig {
@@ -116,8 +114,6 @@ export interface AgentMetrics {
 export interface Instance {
   id: string;
   name: string;
-  /** Public host clients dial into (informational; used in client.toml hints). */
-  publicHost?: string;
   /** Secret the agent uses to authenticate its WebSocket to the hub. */
   agentToken: string;
   /**
@@ -194,13 +190,11 @@ export type HubToBrowser =
 
 export interface CreateInstanceInput {
   name: string;
-  publicHost?: string;
   config?: Partial<RatholeConfig>;
 }
 
 export interface UpdateInstanceInput {
   name?: string;
-  publicHost?: string;
   config?: RatholeConfig;
 }
 
@@ -210,7 +204,6 @@ export interface EnrollInput {
   nodeId: string;
   /** Desired instance name; defaults to the node hostname. */
   name?: string;
-  publicHost?: string;
 }
 
 /** Credentials the hub returns to a freshly enrolled (or re-enrolled) agent. */
