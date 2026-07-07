@@ -84,11 +84,11 @@ Nodes **self-enroll** — you don't create instances in the panel.
 
 ### Install via APT (recommended)
 
-The CI publishes signed-off `.deb` packages (amd64 + arm64) to an APT repo on
+The CI publishes signed-off `.deb` packages (amd64 + arm64) to the APT repo on
 GitHub Pages:
 
 ```bash
-echo "deb [trusted=yes] https://<owner>.github.io/<repo>/apt ./" \
+echo "deb [trusted=yes] https://nicomanage.github.io/rathole-manage/apt ./" \
   | sudo tee /etc/apt/sources.list.d/rathole-agent.list
 sudo apt-get update
 sudo apt-get install rathole-agent
@@ -98,9 +98,9 @@ sudo rathole-agent login
 sudo systemctl enable --now rathole-agent
 ```
 
-The install page (with the exact URL for this repo) is the GitHub Pages site
-itself. Publishing is done by `.github/workflows/apt-pages.yml`; enable it once
-under **Settings → Pages → Build and deployment → GitHub Actions**.
+The install page is `https://nicomanage.github.io/rathole-manage/`. Publishing is
+done by `.github/workflows/apt-pages.yml`; enable it once under **Settings →
+Pages → Build and deployment → GitHub Actions**.
 
 ### Build from source
 
