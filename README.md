@@ -10,7 +10,7 @@ From the panel you can:
 - register and manage **multiple rathole instances** in real time
 - set global defaults for newly created instances
 - edit the control channel + per-service forwarding and generate `client.toml`
-- let the Worker generate and push `server.toml`, which the agent applies automatically
+- let the Worker push typed server config, which the agent applies directly to embedded rathole
 - auto-generate a default service token for each new instance
 - **start / stop / restart** the embedded rathole remotely
 - watch **live logs** and basic metrics (CPU, memory, uptime) streamed from each node
@@ -32,8 +32,8 @@ From the panel you can:
               ┌──────────────────┐                                 │
               │  rathole-agent   │  (Rust, on each server)         │
               │  ├─ embeds rathole::run() in-process               │
-              │  ├─ writes Worker-managed server.toml, hot-reload  │
-              │  └─ streams logs + metrics back                    │
+              │  ├─ applies typed config via patched rathole API    │
+              │  └─ streams logs + direct state/metrics back        │
               └──────────────────┘
 ```
 
@@ -107,6 +107,7 @@ workflow once. The APT URL starts working after that workflow publishes
 
 ```bash
 cd agent
+../scripts/prepare-rathole-patch.sh
 cargo build --release
 sudo install -m0755 target/release/rathole-agent /usr/local/bin/
 
@@ -121,21 +122,23 @@ sudo systemctl enable --now rathole-agent
 ```
 
 The node appears in the panel automatically and turns **online**. From there,
-edit its services; the Worker generates `server.toml` and pushes it, and the
-embedded rathole hot-reloads. Re-running `login` on the same machine reclaims the
-same instance (idempotent by machine-id), so it never creates duplicates.
+edit its services; the Worker pushes structured config to the agent, and the
+agent restarts embedded rathole through a patched direct API. Re-running `login`
+on the same machine reclaims the same instance (idempotent by machine-id), so it
+never creates duplicates.
 
 For non-interactive fleets you can skip `login` and set `HUB_URL`, `INSTANCE_ID`
 and `AGENT_TOKEN` in the environment instead (see `agent/agent.env.example`).
 
-## Config model → rathole TOML
+## Config Model
 
 Each instance has a control channel (`bind_addr`, an auto-generated
 `default_token`, transport: `tcp` / `tls` / `noise` / `websocket`) and a list of
 services. A service maps a public `bind_addr` on the server to a `local_addr` on
-the client behind NAT. `src/worker/server-config.ts` privately generates the
-Worker-managed `server.toml`; `src/shared/config-generator.ts` generates the
-operator-facing `client.toml`.
+the client behind NAT. The Worker sends the server-side model to the agent as
+structured JSON; the agent converts it to rathole's typed config and calls the
+patched embedded API directly. `src/shared/config-generator.ts` still generates
+the operator-facing `client.toml`.
 
 ## Security notes
 

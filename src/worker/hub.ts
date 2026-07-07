@@ -23,7 +23,7 @@ import type {
   User,
   UserView,
 } from "@shared/types";
-import { generateServerToml, hashServerConfig } from "./server-config";
+import { hashServerConfig } from "./server-config";
 
 /** Result of a user mutation that can fail validation. */
 export type UserMutation =
@@ -420,10 +420,9 @@ export class RatholeHub extends DurableObject<Env> {
   // ---- fan-out ------------------------------------------------------------
 
   private pushConfig(inst: Instance, only?: WebSocket) {
-    const toml = generateServerToml(inst.config, inst.name);
-    const configHash = hashServerConfig(toml);
+    const configHash = hashServerConfig(JSON.stringify(inst.config));
     const services = inst.config.services.map((s) => ({ name: s.name, bindAddr: s.bindAddr }));
-    const msg: HubToAgent = { type: "apply_config", toml, configHash, services };
+    const msg: HubToAgent = { type: "apply_config", config: inst.config, configHash, services };
     const targets = only ? [only] : this.ctx.getWebSockets(`agent:${inst.id}`);
     for (const ws of targets) this.safeSend(ws, msg);
   }

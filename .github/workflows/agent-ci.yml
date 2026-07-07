@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare patched rathole
+        run: bash ./scripts/prepare-rathole-patch.sh
+        working-directory: .
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -60,6 +63,9 @@ jobs:
             cross: true
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare patched rathole
+        run: bash ./scripts/prepare-rathole-patch.sh
+        working-directory: .
 
       - uses: dtolnay/rust-toolchain@stable
         with:

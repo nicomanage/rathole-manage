@@ -1,16 +1,22 @@
-//! Supervises the embedded rathole server. rathole runs *in-process* via
-//! `rathole::run()`; there is no child process. Config hot-reload is handled by
-//! rathole itself (it watches the config file), so applying a new config is just
-//! a file write. A full restart is available for changes rathole can't hot-swap.
+//! Supervises the embedded rathole server. rathole runs *in-process* via a
+//! small patched API that accepts a typed server config directly; the agent no
+//! longer writes Worker-generated TOML or infers state from rathole logs.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use rathole::config::{
+    MaskedString, NoiseConfig, ServerConfig, ServerServiceConfig, ServiceType, TlsConfig,
+    TransportConfig, TransportType, WebsocketConfig,
+};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::protocol::ProcessState;
+use crate::protocol::{
+    ProcessState, RatholeConfig, RatholeService, ServiceRef, ServiceType as WireServiceType,
+    TransportType as WireTransportType,
+};
 
 struct Running {
     shutdown: broadcast::Sender<bool>,
@@ -18,15 +24,17 @@ struct Running {
 }
 
 pub struct Runner {
-    config_path: PathBuf,
+    config: Option<ServerConfig>,
+    services: Vec<ServiceRef>,
     inner: Option<Running>,
     last_error: Option<String>,
 }
 
 impl Runner {
-    pub fn new(config_path: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
-            config_path,
+            config: None,
+            services: Vec::new(),
             inner: None,
             last_error: None,
         }
@@ -49,34 +57,65 @@ impl Runner {
         }
     }
 
-    /// Overwrite the config file on disk (rathole hot-reloads it while running).
-    pub async fn write_config(&self, toml: &str) -> Result<()> {
-        if let Some(dir) = self.config_path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .with_context(|| format!("creating config dir {}", dir.display()))?;
+    pub fn services(&self) -> Vec<ServiceRef> {
+        self.services.clone()
+    }
+
+    pub fn service_status(&self) -> Option<HashMap<String, bool>> {
+        if self.services.is_empty() {
+            return None;
         }
-        tokio::fs::write(&self.config_path, toml)
-            .await
-            .with_context(|| format!("writing config {}", self.config_path.display()))?;
+        let online = self.is_running();
+        Some(
+            self.services
+                .iter()
+                .map(|svc| (svc.name.clone(), online))
+                .collect(),
+        )
+    }
+
+    pub async fn apply_config(&mut self, config: RatholeConfig) -> Result<()> {
+        let services = config
+            .services
+            .iter()
+            .map(|svc| ServiceRef {
+                name: svc.name.clone(),
+                bind_addr: svc.bind_addr.clone(),
+            })
+            .collect::<Vec<_>>();
+        let server = to_server_config(config).context("building rathole server config")?;
+        self.services = services;
+        self.config = Some(server);
+        self.last_error = None;
+
+        if self.services.is_empty() {
+            self.stop().await;
+            return Ok(());
+        }
+
+        self.restart().await;
         Ok(())
     }
 
     /// Start the embedded rathole server if it isn't already running.
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> Result<()> {
         if self.is_running() {
-            return;
+            return Ok(());
+        }
+        let Some(config) = self.config.clone() else {
+            return Ok(());
+        };
+        if config.services.is_empty() {
+            return Ok(());
         }
         let (tx, rx) = broadcast::channel::<bool>(4);
-        let cli = rathole::Cli {
-            config_path: Some(self.config_path.clone()),
-            server: true,
-            client: false,
-            genkey: None,
-        };
-        tracing::info!(config = %self.config_path.display(), "starting embedded rathole server");
+        tracing::info!(
+            bind_addr = %config.bind_addr,
+            services = config.services.len(),
+            "starting embedded rathole server"
+        );
         let handle = tokio::spawn(async move {
-            match rathole::run(cli, rx).await {
+            match rathole::run_server_direct(config, rx).await {
                 Ok(()) => {
                     tracing::info!("rathole server stopped");
                     Ok(())
@@ -92,6 +131,7 @@ impl Runner {
             handle,
         });
         self.last_error = None;
+        Ok(())
     }
 
     /// Ask rathole to shut down, waiting up to a few seconds for a clean stop.
@@ -112,6 +152,67 @@ impl Runner {
 
     pub async fn restart(&mut self) {
         self.stop().await;
-        self.start();
+        if let Err(e) = self.start() {
+            self.last_error = Some(format!("{e:#}"));
+        }
     }
+}
+
+fn mask(value: Option<String>) -> Option<MaskedString> {
+    value.map(|v| MaskedString::from(v.as_str()))
+}
+
+fn service_type(kind: WireServiceType) -> ServiceType {
+    match kind {
+        WireServiceType::Tcp => ServiceType::Tcp,
+        WireServiceType::Udp => ServiceType::Udp,
+    }
+}
+
+fn service_config(service: RatholeService) -> ServerServiceConfig {
+    ServerServiceConfig {
+        service_type: service_type(service.service_type),
+        name: service.name,
+        bind_addr: service.bind_addr,
+        token: mask(service.token),
+        nodelay: service.nodelay,
+    }
+}
+
+fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
+    let mut transport = TransportConfig::default();
+    transport.transport_type = match config.transport {
+        WireTransportType::Tcp => TransportType::Tcp,
+        WireTransportType::Tls => TransportType::Tls,
+        WireTransportType::Noise => TransportType::Noise,
+        WireTransportType::Websocket => TransportType::Websocket,
+    };
+    transport.tls = config.tls.map(|tls| TlsConfig {
+        hostname: tls.hostname,
+        trusted_root: tls.trusted_root,
+        pkcs12: tls.pkcs_path,
+        pkcs12_password: mask(tls.keystore_password),
+    });
+    transport.noise = config.noise.map(|noise| NoiseConfig {
+        pattern: noise.pattern.unwrap_or_else(|| "Noise_NK_25519_ChaChaPoly_BLAKE2s".into()),
+        local_private_key: mask(noise.local_private_key),
+        remote_public_key: noise.remote_public_key,
+    });
+    transport.websocket = config.websocket.map(|websocket| WebsocketConfig {
+        tls: websocket.tls.unwrap_or(false),
+    });
+
+    let services = config
+        .services
+        .into_iter()
+        .map(|svc| (svc.name.clone(), service_config(svc)))
+        .collect();
+
+    Ok(ServerConfig {
+        bind_addr: config.bind_addr,
+        default_token: mask(config.default_token),
+        services,
+        transport,
+        heartbeat_interval: config.heartbeat_interval.unwrap_or(30),
+    })
 }

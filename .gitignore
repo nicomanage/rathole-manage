@@ -13,6 +13,8 @@ worker-configuration.d.ts
 
 # rust agent
 agent/target/
+vendor/
+.tmp-rathole-*/
 
 # env & secrets
 .dev.vars

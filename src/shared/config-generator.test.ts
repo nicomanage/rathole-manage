@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultConfig, generateClientToml, validateConfig } from "./config-generator";
-import { generateServerToml, hashServerConfig } from "../worker/server-config";
+import { hashServerConfig } from "../worker/server-config";
 import type { RatholeConfig } from "./types";
 
 function config(overrides: Partial<RatholeConfig> = {}): RatholeConfig {
@@ -53,29 +53,6 @@ describe("validateConfig", () => {
       config({ services: [{ name: "s", type: "tcp", bindAddr: "oops" }] }),
     );
     expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
-  });
-});
-
-describe("generateServerToml", () => {
-  it("emits server + service tables with tokens", () => {
-    const toml = generateServerToml(config(), "edge-1");
-    expect(toml).toContain("[server]");
-    expect(toml).toContain('bind_addr = "0.0.0.0:2333"');
-    expect(toml).toContain('default_token = "secret"');
-    expect(toml).toContain("[server.services.ssh]");
-    expect(toml).toContain('bind_addr = "0.0.0.0:5202"');
-  });
-
-  it("quotes service names that are not bare keys", () => {
-    const toml = generateServerToml(
-      config({ services: [{ name: "my nas", type: "tcp", bindAddr: "0.0.0.0:1" }] }),
-    );
-    expect(toml).toContain('[server.services."my nas"]');
-  });
-
-  it("emits an empty services map when no services are configured", () => {
-    const toml = generateServerToml(config({ services: [] }));
-    expect(toml).toContain("services = {}");
   });
 });
 

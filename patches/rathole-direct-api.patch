@@ -1,0 +1,46 @@
+diff --git a/src/config.rs b/src/config.rs
+index ca85fc2..ebf6110 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -252,7 +252,7 @@ impl Config {
+         }
+     }
+ 
+-    fn validate_server_config(server: &mut ServerConfig) -> Result<()> {
++    pub fn validate_server_config(server: &mut ServerConfig) -> Result<()> {
+         // Validate services
+         for (name, s) in &mut server.services {
+             s.name = name.clone();
+diff --git a/src/lib.rs b/src/lib.rs
+index 7fb2fa6..08bd43a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,5 @@
+ mod cli;
+-mod config;
++pub mod config;
+ mod config_watcher;
+ mod constants;
+ mod helper;
+@@ -114,6 +114,21 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
+     Ok(())
+ }
+ 
++#[cfg(feature = "server")]
++pub async fn run_server_direct(
++    mut server: config::ServerConfig,
++    shutdown_rx: broadcast::Receiver<bool>,
++) -> Result<()> {
++    fdlimit::raise_fd_limit();
++    config::Config::validate_server_config(&mut server)?;
++    let config = Config {
++        server: Some(server),
++        client: None,
++    };
++    let (_service_update_tx, service_update_rx) = mpsc::channel(1);
++    run_server(config, shutdown_rx, service_update_rx).await
++}
++
+ async fn run_instance(
+     config: Config,
+     args: Cli,

@@ -9,7 +9,70 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// A service the agent probes for reachability.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportType {
+    Tcp,
+    Tls,
+    Noise,
+    Websocket,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceType {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RatholeService {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub service_type: ServiceType,
+    pub bind_addr: String,
+    pub token: Option<String>,
+    pub nodelay: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsConfig {
+    pub pkcs_path: Option<String>,
+    pub keystore_password: Option<String>,
+    pub trusted_root: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseConfig {
+    pub pattern: Option<String>,
+    pub local_private_key: Option<String>,
+    pub remote_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsocketConfig {
+    pub tls: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RatholeConfig {
+    pub bind_addr: String,
+    pub default_token: Option<String>,
+    pub transport: TransportType,
+    pub tls: Option<TlsConfig>,
+    pub noise: Option<NoiseConfig>,
+    pub websocket: Option<WebsocketConfig>,
+    pub heartbeat_interval: Option<u64>,
+    pub services: Vec<RatholeService>,
+}
+
+/// A service the agent reports status for.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceRef {
@@ -108,7 +171,7 @@ pub enum HubToAgent {
         name: String,
     },
     ApplyConfig {
-        toml: String,
+        config: RatholeConfig,
         config_hash: String,
         #[serde(default)]
         services: Vec<ServiceRef>,

@@ -14,12 +14,9 @@ mod enroll;
 mod logcap;
 mod protocol;
 mod runner;
-mod svcstatus;
 mod sysstat;
 mod tui;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,13 +28,8 @@ use tracing_subscriber::prelude::*;
 use url::Url;
 
 use logcap::ChannelMakeWriter;
-use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics, ProcessState, ServiceRef};
+use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics};
 use runner::Runner;
-use svcstatus::ServiceStatus;
-
-/// The set of configured service names, updated on each config apply. Used to
-/// decide which services to report status for.
-type SharedServices = Arc<Mutex<Vec<ServiceRef>>>;
 
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
 
@@ -47,7 +39,6 @@ struct RunConfig {
     hub_base: String,
     instance_id: String,
     agent_token: String,
-    config_path: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -121,10 +112,6 @@ fn cmd_run() -> Result<()> {
 }
 
 fn resolve_run_config() -> Result<RunConfig> {
-    let config_path: PathBuf = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "/etc/rathole-manage/server.toml".to_string())
-        .into();
-
     // 1) Explicit env credentials win (non-interactive / static provisioning).
     if let (Ok(instance_id), Ok(agent_token), Ok(hub_url)) = (
         std::env::var("INSTANCE_ID"),
@@ -136,7 +123,6 @@ fn resolve_run_config() -> Result<RunConfig> {
                 hub_base: enroll::http_origin(&hub_url)?,
                 instance_id,
                 agent_token,
-                config_path,
             });
         }
     }
@@ -148,7 +134,6 @@ fn resolve_run_config() -> Result<RunConfig> {
             hub_base: id.hub_url,
             instance_id: id.instance_id,
             agent_token: id.agent_token,
-            config_path,
         });
     }
 
@@ -164,36 +149,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-/// Report online state for every configured service, sourced from rathole's
-/// tracing events. A service is online only if rathole is running and its
-/// control channel is currently established.
-async fn collect_service_status(
-    services: &SharedServices,
-    status: &ServiceStatus,
-    state: ProcessState,
-) -> Option<HashMap<String, bool>> {
-    let names: Vec<String> = services
-        .lock()
-        .await
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
-    if names.is_empty() {
-        return None;
-    }
-    let running = matches!(state, ProcessState::Running);
-    let map = status.lock().unwrap();
-    Some(
-        names
-            .into_iter()
-            .map(|name| {
-                let online = running && map.get(&name).copied().unwrap_or(false);
-                (name, online)
-            })
-            .collect(),
-    )
 }
 
 fn build_ws_url(cfg: &RunConfig) -> Result<String> {
@@ -212,13 +167,8 @@ fn build_ws_url(cfg: &RunConfig) -> Result<String> {
 }
 
 async fn run_daemon() -> Result<()> {
-    // Per-service online state, derived from rathole's own tracing events.
-    let service_status: ServiceStatus = Arc::new(std::sync::Mutex::new(HashMap::new()));
-
-    // Route all tracing (agent + embedded rathole) into a channel for streaming,
-    // and into the service-status layer. Keep the filter at info or lower so
-    // rathole's per-service `handle` spans are recorded (their open/close drives
-    // service online state).
+    // Route all tracing (agent + embedded rathole) into a channel for streaming.
+    // Service status is reported directly from the runner's typed config/state.
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<String>();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -229,14 +179,12 @@ async fn run_daemon() -> Result<()> {
                 .with_ansi(false)
                 .with_writer(ChannelMakeWriter::new(log_tx)),
         )
-        .with(svcstatus::ServiceStatusLayer::new(service_status.clone()))
         .init();
 
     let cfg = resolve_run_config()?;
     tracing::info!(instance = %cfg.instance_id, hub = %cfg.hub_base, "rathole-agent starting");
 
-    let runner = Arc::new(Mutex::new(Runner::new(cfg.config_path.clone())));
-    let services: SharedServices = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(Mutex::new(Runner::new()));
     let (to_hub_tx, mut to_hub_rx) = mpsc::unbounded_channel::<String>();
 
     // Forward captured log lines up to the hub.
@@ -260,15 +208,16 @@ async fn run_daemon() -> Result<()> {
     {
         let to_hub_tx = to_hub_tx.clone();
         let runner = runner.clone();
-        let services = services.clone();
-        let service_status = service_status.clone();
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
             let mut ticker = tokio::time::interval(Duration::from_secs(8));
             loop {
                 ticker.tick().await;
-                let state = runner.lock().await.state();
+                let guard = runner.lock().await;
+                let state = guard.state();
+                let statuses = guard.service_status();
+                drop(guard);
                 let metrics = Metrics {
                     cpu_percent: collector.cpu_percent(),
                     memory_mb: collector.memory_mb(),
@@ -278,7 +227,6 @@ async fn run_daemon() -> Result<()> {
                     hostname: hostname.clone(),
                     config_in_sync: None,
                 };
-                let statuses = collect_service_status(&services, &service_status, state).await;
                 let msg = AgentToHub::Status {
                     process_state: state,
                     metrics: Some(metrics),
@@ -294,7 +242,7 @@ async fn run_daemon() -> Result<()> {
     // Connection loop with exponential backoff. rathole keeps running across drops.
     let mut backoff = 1u64;
     loop {
-        match connect_once(&cfg, &runner, &services, &to_hub_tx, &mut to_hub_rx).await {
+        match connect_once(&cfg, &runner, &to_hub_tx, &mut to_hub_rx).await {
             Ok(()) => {
                 tracing::warn!("hub connection closed, reconnecting");
                 backoff = 1;
@@ -311,7 +259,6 @@ async fn run_daemon() -> Result<()> {
 async fn connect_once(
     cfg: &RunConfig,
     runner: &Arc<Mutex<Runner>>,
-    services: &SharedServices,
     to_hub_tx: &mpsc::UnboundedSender<String>,
     to_hub_rx: &mut mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
@@ -339,7 +286,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        handle_hub_message(&text, runner, services, to_hub_tx).await;
+                        handle_hub_message(&text, runner, to_hub_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
@@ -362,7 +309,6 @@ async fn connect_once(
 async fn handle_hub_message(
     text: &str,
     runner: &Arc<Mutex<Runner>>,
-    services: &SharedServices,
     to_hub_tx: &mpsc::UnboundedSender<String>,
 ) {
     let msg: HubToAgent = match serde_json::from_str(text) {
@@ -384,19 +330,14 @@ async fn handle_hub_message(
             tracing::info!(%name, "hub acknowledged registration");
         }
         HubToAgent::ApplyConfig {
-            toml,
+            config,
             config_hash,
-            services: svc_list,
+            services: _,
         } => {
             tracing::info!(hash = %config_hash, "applying config from hub");
-            *services.lock().await = svc_list;
             let mut guard = runner.lock().await;
-            match guard.write_config(&toml).await {
+            match guard.apply_config(config).await {
                 Ok(()) => {
-                    // Auto-start on first config; rathole hot-reloads subsequent writes.
-                    if !guard.is_running() {
-                        guard.start();
-                    }
                     reply(AgentToHub::ConfigAck {
                         ok: true,
                         error: None,
@@ -414,23 +355,30 @@ async fn handle_hub_message(
         HubToAgent::Command { command } => {
             tracing::info!(?command, "executing command");
             let mut guard = runner.lock().await;
-            match command {
+            let result = match command {
                 AgentCommand::Start => guard.start(),
-                AgentCommand::Stop => guard.stop().await,
-                AgentCommand::Restart | AgentCommand::Reload => guard.restart().await,
-                AgentCommand::Status => {}
-            }
+                AgentCommand::Stop => {
+                    guard.stop().await;
+                    Ok(())
+                }
+                AgentCommand::Restart | AgentCommand::Reload => {
+                    guard.restart().await;
+                    Ok(())
+                }
+                AgentCommand::Status => Ok(()),
+            };
             let state = guard.state();
+            let statuses = guard.service_status();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
-                ok: true,
-                error: None,
+                ok: result.is_ok(),
+                error: result.err().map(|e| format!("{e:#}")),
             });
             reply(AgentToHub::Status {
                 process_state: state,
                 metrics: None,
-                service_status: None,
+                service_status: statuses,
             });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),
@@ -452,7 +400,6 @@ mod tests {
             hub_base: hub_base.to_string(),
             instance_id: "abc".to_string(),
             agent_token: "tok".to_string(),
-            config_path: PathBuf::from("/tmp/server.toml"),
         }
     }
 

@@ -173,7 +173,7 @@ export interface ServiceRef {
 /** Messages the hub sends down to an agent. */
 export type HubToAgent =
   | { type: "registered"; instanceId: string; name: string }
-  | { type: "apply_config"; toml: string; configHash: string; services?: ServiceRef[] }
+  | { type: "apply_config"; config: RatholeConfig; configHash: string; services?: ServiceRef[] }
   | { type: "command"; command: AgentCommand }
   | { type: "ping" }
   | { type: "error"; message: string };

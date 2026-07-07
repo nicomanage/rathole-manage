@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # rathole is embedded directly as a library — we call rathole::run() in-process,
 # so there is no separate rathole binary to install or supervise.
-rathole = "0.5"
+rathole = { version = "0.5", features = ["server"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
@@ -42,6 +42,9 @@ openssl = { version = "0.10", features = ["vendored"] }
 [profile.release]
 strip = true
 lto = "thin"
+
+[patch.crates-io]
+rathole = { path = "../vendor/rathole" }
 
 # ---- Debian packaging (cargo-deb) ------------------------------------------
 [package.metadata.deb]
