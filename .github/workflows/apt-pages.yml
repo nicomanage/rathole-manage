@@ -42,13 +42,13 @@ jobs:
             cross: true
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare patched rathole
-        run: bash ./scripts/prepare-rathole-patch.sh
-        working-directory: .
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Prepare patched rathole
+        run: bash ./scripts/prepare-rathole-patch.sh
+        working-directory: .
 
       - uses: Swatinem/rust-cache@v2
         with:

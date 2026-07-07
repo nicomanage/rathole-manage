@@ -4,14 +4,12 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version = "0.5.0"
 $tmp = Join-Path $root ".tmp-rathole-$version"
 $dest = Join-Path $root "vendor\rathole"
-$archive = Join-Path $tmp "rathole-$version.crate"
 
 Remove-Item -Recurse -Force $tmp, $dest -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $tmp, (Join-Path $root "vendor") | Out-Null
 
-Invoke-WebRequest -Uri "https://crates.io/api/v1/crates/rathole/$version/download" -OutFile $archive
-tar -xzf $archive -C $tmp
-Move-Item -LiteralPath (Join-Path $tmp "rathole-$version") -Destination $dest
+cargo vendor --versioned-dirs --sync (Join-Path $root "agent\Cargo.toml") (Join-Path $tmp "vendor") | Out-Null
+Move-Item -LiteralPath (Join-Path $tmp "vendor\rathole-$version") -Destination $dest
 
 $patch = Join-Path $root "patches\rathole-direct-api.patch"
 git -C $root apply --directory=vendor/rathole $patch
