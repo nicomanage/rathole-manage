@@ -57,6 +57,21 @@ impl Runner {
         }
     }
 
+    pub async fn refresh(&mut self) {
+        if !self.inner.as_ref().is_some_and(|r| r.handle.is_finished()) {
+            return;
+        }
+
+        let Some(running) = self.inner.take() else {
+            return;
+        };
+        match running.handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => self.last_error = Some(msg),
+            Err(join_err) => self.last_error = Some(join_err.to_string()),
+        }
+    }
+
     pub fn service_status(&self) -> Option<HashMap<String, bool>> {
         if self.services.is_empty() {
             return None;

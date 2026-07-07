@@ -214,7 +214,8 @@ async fn run_daemon() -> Result<()> {
             let mut ticker = tokio::time::interval(Duration::from_secs(8));
             loop {
                 ticker.tick().await;
-                let guard = runner.lock().await;
+                let mut guard = runner.lock().await;
+                guard.refresh().await;
                 let state = guard.state();
                 let statuses = guard.service_status();
                 drop(guard);
