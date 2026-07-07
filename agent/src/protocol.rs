@@ -171,7 +171,7 @@ pub enum HubToAgent {
         name: String,
     },
     ApplyConfig {
-        config: RatholeConfig,
+        config: Box<RatholeConfig>,
         config_hash: String,
         #[serde(default)]
         services: Vec<ServiceRef>,

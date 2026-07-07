@@ -20,6 +20,10 @@ rathole = "=$version"
 "@
 Set-Content -LiteralPath (Join-Path $fetch "Cargo.toml") -Value $manifest -NoNewline
 
+# cargo refuses to parse a package with no target, so give it an empty lib.
+New-Item -ItemType Directory -Force (Join-Path $fetch "src") | Out-Null
+Set-Content -LiteralPath (Join-Path $fetch "src\lib.rs") -Value "" -NoNewline
+
 Push-Location $fetch
 try {
     cargo vendor --versioned-dirs (Join-Path $tmp "vendor") | Out-Null

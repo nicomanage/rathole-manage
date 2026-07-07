@@ -336,7 +336,7 @@ async fn handle_hub_message(
         } => {
             tracing::info!(hash = %config_hash, "applying config from hub");
             let mut guard = runner.lock().await;
-            match guard.apply_config(config).await {
+            match guard.apply_config(*config).await {
                 Ok(()) => {
                     reply(AgentToHub::ConfigAck {
                         ok: true,

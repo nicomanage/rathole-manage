@@ -57,10 +57,6 @@ impl Runner {
         }
     }
 
-    pub fn services(&self) -> Vec<ServiceRef> {
-        self.services.clone()
-    }
-
     pub fn service_status(&self) -> Option<HashMap<String, bool>> {
         if self.services.is_empty() {
             return None;
@@ -194,7 +190,9 @@ fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
         pkcs12_password: mask(tls.keystore_password),
     });
     transport.noise = config.noise.map(|noise| NoiseConfig {
-        pattern: noise.pattern.unwrap_or_else(|| "Noise_NK_25519_ChaChaPoly_BLAKE2s".into()),
+        pattern: noise
+            .pattern
+            .unwrap_or_else(|| "Noise_NK_25519_ChaChaPoly_BLAKE2s".into()),
         local_private_key: mask(noise.local_private_key),
         remote_public_key: noise.remote_public_key,
     });

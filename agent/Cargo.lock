@@ -1531,8 +1531,6 @@ dependencies = [
 [[package]]
 name = "rathole"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6358cf83f700408be4176f5bb96976404366154c384185cd79cfa8f43087ae4f"
 dependencies = [
  "anyhow",
  "async-http-proxy",
