@@ -11,7 +11,7 @@ name: apt-pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
     tags: ["v*", "agent-v*"]
   workflow_dispatch:
 
