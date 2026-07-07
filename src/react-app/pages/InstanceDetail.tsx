@@ -166,6 +166,7 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
+          <TabsTrigger value="traffic">Traffic</TabsTrigger>
           <TabsTrigger value="logs">Live logs</TabsTrigger>
           <TabsTrigger value="agent">Agent setup</TabsTrigger>
         </TabsList>
@@ -179,6 +180,9 @@ export function InstanceDetail() {
             online={instance.status === "online"}
             canEdit={isAdmin}
           />
+        </TabsContent>
+        <TabsContent value="traffic">
+          <MonthlyTraffic monthly={instance.monthlyTraffic} live={instance.traffic} />
         </TabsContent>
         <TabsContent value="logs">
           <LogsPanel id={id} />
@@ -225,6 +229,78 @@ function formatUptime(s: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
+}
+
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  if (!y || !m) return key;
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    timeZone: "UTC",
+  });
+}
+
+function MonthlyTraffic({
+  monthly,
+  live,
+}: {
+  monthly?: Record<string, TrafficStat>;
+  live?: Record<string, TrafficStat>;
+}) {
+  const months = Object.entries(monthly ?? {}).sort(([a], [b]) => b.localeCompare(a));
+  const liveTotal = Object.values(live ?? {}).reduce(
+    (acc, t) => ({ bytesIn: acc.bytesIn + t.bytesIn, bytesOut: acc.bytesOut + t.bytesOut }),
+    { bytesIn: 0, bytesOut: 0 },
+  );
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Monthly traffic</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {months.length === 0 ? (
+            <p className="px-6 pb-6 text-sm text-muted-foreground">
+              No traffic recorded yet. Totals accumulate here per month as the node forwards data.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Month</TableHead>
+                  <TableHead className="text-right">↓ Out</TableHead>
+                  <TableHead className="text-right">↑ In</TableHead>
+                  <TableHead className="text-right">Total</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {months.map(([key, t]) => (
+                  <TableRow key={key}>
+                    <TableCell className="font-medium">{monthLabel(key)}</TableCell>
+                    <TableCell className="text-right font-mono text-success">
+                      {formatBytes(t.bytesOut)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-muted-foreground">
+                      {formatBytes(t.bytesIn)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatBytes(t.bytesIn + t.bytesOut)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+      <p className="text-xs text-muted-foreground">
+        Live counters (since the agent started): ↓ {formatBytes(liveTotal.bytesOut)} out · ↑{" "}
+        {formatBytes(liveTotal.bytesIn)} in. Monthly totals are persisted and survive agent restarts.
+      </p>
+    </div>
+  );
 }
 
 function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }) {

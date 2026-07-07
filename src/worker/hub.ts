@@ -24,6 +24,7 @@ import type {
   UserView,
 } from "@shared/types";
 import { hashServerConfig } from "./server-config";
+import { accumulateMonthlyTraffic } from "./traffic";
 
 /** Result of a user mutation that can fail validation. */
 export type UserMutation =
@@ -371,7 +372,11 @@ export class RatholeHub extends DurableObject<Env> {
         inst.processState = msg.processState;
         if (msg.metrics) inst.metrics = { ...inst.metrics, ...msg.metrics };
         if (msg.serviceStatus) inst.serviceStatus = msg.serviceStatus;
-        if (msg.traffic) inst.traffic = msg.traffic;
+        if (msg.traffic) {
+          // Fold the delta into this month's total before overwriting the snapshot.
+          accumulateMonthlyTraffic(inst, msg.traffic);
+          inst.traffic = msg.traffic;
+        }
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
         break;

@@ -140,9 +140,11 @@ export interface Instance {
   serviceStatus?: Record<string, boolean>;
   /**
    * Cumulative per-service traffic (since the agent process started), keyed by
-   * service name.
+   * service name. Used to compute deltas for monthly accounting.
    */
   traffic?: Record<string, TrafficStat>;
+  /** Persisted per-month totals for this instance, keyed by UTC month "YYYY-MM". */
+  monthlyTraffic?: Record<string, TrafficStat>;
   createdAt: number;
   updatedAt: number;
 }
