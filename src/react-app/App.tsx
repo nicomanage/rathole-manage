@@ -11,7 +11,6 @@ import { Waypoints, LogOut, Server, Settings2, Users as UsersIcon, KeyRound } fr
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -128,8 +127,7 @@ function AppShell({
         <nav className="flex-1 space-y-1 p-3">
           <NavLinks pathname={location.pathname} />
         </nav>
-        <div className="space-y-1 border-t p-3">
-          <AccountRow />
+        <div className="border-t p-3">
           <SignOutButton onLogout={onLogout} className="w-full justify-start" />
         </div>
       </aside>
@@ -181,22 +179,6 @@ function NavLinks({ pathname, compact }: { pathname: string; compact?: boolean }
         </Link>
       ))}
     </>
-  );
-}
-
-function AccountRow() {
-  const { username, role } = useAuth();
-  if (!username) return null;
-  return (
-    <div className="flex items-center justify-between rounded-lg px-3 py-2 text-sm">
-      <div className="min-w-0">
-        <p className="truncate font-medium">{username}</p>
-        <Badge variant="secondary" className="mt-0.5">
-          {role}
-        </Badge>
-      </div>
-      <ChangePasswordDialog />
-    </div>
   );
 }
 
