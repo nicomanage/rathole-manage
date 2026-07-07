@@ -90,6 +90,7 @@ jobs:
       run:
         working-directory: .
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:

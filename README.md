@@ -99,7 +99,9 @@ sudo systemctl enable --now rathole-agent
 
 The install page is `https://nicomanage.github.io/rathole-manage/`. Publishing is
 done by `.github/workflows/apt-pages.yml`; enable it once under **Settings →
-Pages → Build and deployment → GitHub Actions**.
+Pages → Build and deployment → GitHub Actions**, then run the `apt-pages`
+workflow once. The APT URL starts working after that workflow publishes
+`apt/Packages`.
 
 ### Build from source
 
