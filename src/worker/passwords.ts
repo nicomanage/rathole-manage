@@ -7,7 +7,8 @@
 import type { User } from "@shared/types";
 
 const encoder = new TextEncoder();
-export const DEFAULT_ITERATIONS = 210_000;
+// Cloudflare Workers currently rejects PBKDF2 iteration counts above 100,000.
+export const DEFAULT_ITERATIONS = 100_000;
 const KEY_BITS = 256;
 
 function toHex(bytes: Uint8Array): string {

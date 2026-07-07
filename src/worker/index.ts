@@ -9,7 +9,7 @@
 
 import { RatholeHub } from "./hub";
 import { defaultConfig, validateConfig } from "@shared/config-generator";
-import { hashPassword, verifyPassword } from "./passwords";
+import { DEFAULT_ITERATIONS, hashPassword, verifyPassword } from "./passwords";
 import type {
   AgentCommand,
   CreateInstanceInput,
@@ -148,7 +148,13 @@ async function authenticate(
 /** Seed the first admin from env credentials when the user store is empty. */
 async function ensureBootstrap(env: Env, stub: DurableObjectStub<RatholeHub>): Promise<void> {
   if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD) return;
-  if ((await stub.countUsers()) > 0) return;
+  if ((await stub.countUsers()) > 0) {
+    const admin = await stub.getUserByUsername(env.ADMIN_USERNAME);
+    if (admin && admin.passwordIterations > DEFAULT_ITERATIONS) {
+      await stub.updateUser(admin.id, { password: await hashPassword(env.ADMIN_PASSWORD) });
+    }
+    return;
+  }
   const now = Date.now();
   await stub.bootstrapAdmin({
     id: crypto.randomUUID(),
