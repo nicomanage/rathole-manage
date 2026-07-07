@@ -8,7 +8,12 @@ $dest = Join-Path $root "vendor\rathole"
 Remove-Item -Recurse -Force $tmp, $dest -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $tmp, (Join-Path $root "vendor") | Out-Null
 
-cargo vendor --versioned-dirs --sync (Join-Path $root "agent\Cargo.toml") (Join-Path $tmp "vendor") | Out-Null
+Push-Location (Join-Path $root "agent")
+try {
+    cargo vendor --versioned-dirs (Join-Path $tmp "vendor") | Out-Null
+} finally {
+    Pop-Location
+}
 Move-Item -LiteralPath (Join-Path $tmp "vendor\rathole-$version") -Destination $dest
 
 $patch = Join-Path $root "patches\rathole-direct-api.patch"

@@ -9,7 +9,7 @@ DEST="$ROOT/vendor/rathole"
 rm -rf "$TMP" "$DEST"
 mkdir -p "$TMP" "$ROOT/vendor"
 
-cargo vendor --versioned-dirs --sync "$ROOT/agent/Cargo.toml" "$TMP/vendor" >/dev/null
+(cd "$ROOT/agent" && cargo vendor --versioned-dirs "$TMP/vendor" >/dev/null)
 mv "$TMP/vendor/rathole-$VERSION" "$DEST"
 
 git -C "$ROOT" apply --directory=vendor/rathole "$ROOT/patches/rathole-direct-api.patch"
