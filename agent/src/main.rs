@@ -151,6 +151,17 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn send_log(to_hub_tx: &mpsc::UnboundedSender<String>, line: impl Into<String>) {
+    let msg = AgentToHub::Log {
+        line: line.into(),
+        stream: Some("stdout".into()),
+        ts: now_ms(),
+    };
+    if let Ok(text) = serde_json::to_string(&msg) {
+        let _ = to_hub_tx.send(text);
+    }
+}
+
 fn build_ws_url(cfg: &RunConfig) -> Result<String> {
     let u = Url::parse(&cfg.hub_base).context("invalid hub URL")?;
     let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
@@ -281,6 +292,7 @@ async fn connect_once(
         .send(Message::Text(serde_json::to_string(&register)?))
         .await?;
     tracing::info!("registered with hub");
+    send_log(to_hub_tx, "[agent] registered with hub");
 
     loop {
         tokio::select! {
@@ -336,9 +348,17 @@ async fn handle_hub_message(
             services: _,
         } => {
             tracing::info!(hash = %config_hash, "applying config from hub");
+            send_log(
+                to_hub_tx,
+                format!(
+                    "[agent] applying config {config_hash} ({} services)",
+                    config.services.len()
+                ),
+            );
             let mut guard = runner.lock().await;
             match guard.apply_config(*config).await {
                 Ok(()) => {
+                    send_log(to_hub_tx, "[agent] config applied");
                     reply(AgentToHub::ConfigAck {
                         ok: true,
                         error: None,
@@ -346,6 +366,7 @@ async fn handle_hub_message(
                 }
                 Err(e) => {
                     tracing::error!("failed to apply config: {e:#}");
+                    send_log(to_hub_tx, format!("[agent] config failed: {e:#}"));
                     reply(AgentToHub::ConfigAck {
                         ok: false,
                         error: Some(format!("{e:#}")),

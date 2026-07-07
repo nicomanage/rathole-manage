@@ -354,6 +354,12 @@ export class RatholeHub extends DurableObject<Env> {
         inst.lastSeen = Date.now();
         inst.metrics = { ...inst.metrics, agentVersion: msg.agentVersion, hostname: msg.hostname };
         await this.persist(inst);
+        this.pushLog({
+          type: "log",
+          instanceId,
+          line: `[hub] agent registered${msg.hostname ? ` from ${msg.hostname}` : ""}`,
+          ts: Date.now(),
+        });
         this.safeSend(ws, { type: "registered", instanceId, name: inst.name } satisfies HubToAgent);
         this.pushConfig(inst, ws);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
@@ -383,6 +389,12 @@ export class RatholeHub extends DurableObject<Env> {
         if (inst.metrics) inst.metrics.configInSync = msg.ok;
         else inst.metrics = { configInSync: msg.ok };
         await this.persist(inst);
+        this.pushLog({
+          type: "log",
+          instanceId,
+          line: `[hub] config ${msg.ok ? "applied" : `failed: ${msg.error ?? "unknown error"}`}`,
+          ts: Date.now(),
+        });
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
         break;
       }
@@ -429,6 +441,12 @@ export class RatholeHub extends DurableObject<Env> {
     const services = inst.config.services.map((s) => ({ name: s.name, bindAddr: s.bindAddr }));
     const msg: HubToAgent = { type: "apply_config", config: inst.config, configHash, services };
     const targets = only ? [only] : this.ctx.getWebSockets(`agent:${inst.id}`);
+    this.pushLog({
+      type: "log",
+      instanceId: inst.id,
+      line: `[hub] pushing config ${configHash} (${services.length} services)`,
+      ts: Date.now(),
+    });
     for (const ws of targets) this.safeSend(ws, msg);
   }
 
