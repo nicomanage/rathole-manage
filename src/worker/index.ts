@@ -8,7 +8,7 @@
 //   everything else — static SPA assets (the shadcn panel)
 
 import { RatholeHub } from "./hub";
-import { defaultConfig, validateConfig } from "@shared/config-generator";
+import { defaultConfig, normalizeConfig, validateConfig } from "@shared/config-generator";
 import { hashPassword, verifyPassword } from "./passwords";
 import type {
   AgentCommand,
@@ -184,11 +184,11 @@ function newInstance(
     transport: settings.defaultTransport,
     heartbeatInterval: settings.defaultHeartbeatInterval,
   };
-  const config: RatholeConfig = {
+  const config: RatholeConfig = normalizeConfig({
     ...base,
     ...input.config,
     services: input.config?.services ?? [],
-  };
+  });
   if (!config.defaultToken?.trim()) config.defaultToken = randomToken();
   return {
     id: crypto.randomUUID(),
@@ -501,7 +501,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
         const updated: Instance = {
           ...inst,
           name: body.name?.trim() || inst.name,
-          config: body.config ?? inst.config,
+          config: normalizeConfig(body.config ?? inst.config),
         };
         const issues = validateConfig(updated.config);
         if (issues.length > 0) {

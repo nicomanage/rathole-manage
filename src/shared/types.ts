@@ -14,12 +14,6 @@ export interface RatholeService {
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;
   nodelay?: boolean;
-  /**
-   * Operator-facing domain for this service (e.g. "ssh.example.com"). Metadata
-   * only — rathole forwards raw TCP/UDP; the domain documents where the service
-   * is reached and is shown in the panel.
-   */
-  domain?: string;
 }
 
 export interface TlsConfig {
@@ -43,6 +37,12 @@ export interface WebsocketConfig {
 export interface RatholeConfig {
   /** Control channel bind address, e.g. "0.0.0.0:2333". */
   bindAddr: string;
+  /**
+   * Operator-facing domain for this server (e.g. "node.example.com"). Metadata
+   * only — rathole forwards raw TCP/UDP; the domain documents where the server
+   * is reached and is shown in the panel.
+   */
+  domain?: string;
   defaultToken?: string;
   transport: TransportType;
   tls?: TlsConfig;

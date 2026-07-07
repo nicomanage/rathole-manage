@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
-import { validateConfig } from "@shared/config-generator";
+import { normalizeConfig, validateConfig } from "@shared/config-generator";
 import type {
   AgentCommand,
   InstanceView,
@@ -332,7 +332,7 @@ function ConfigEditor({
   online: boolean;
   canEdit: boolean;
 }) {
-  const [config, setConfig] = useState<RatholeConfig>(structuredClone(initial));
+  const [config, setConfig] = useState<RatholeConfig>(() => normalizeConfig(structuredClone(initial)));
   const [saving, setSaving] = useState(false);
   const issues = useMemo(() => validateConfig(config), [config]);
   const issueByPath = useMemo(
@@ -346,7 +346,7 @@ function ConfigEditor({
 
   // Re-sync if the server pushes an update while we're not editing.
   useEffect(() => {
-    if (!dirty) setConfig(structuredClone(initial));
+    if (!dirty) setConfig(normalizeConfig(structuredClone(initial)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(initial)]);
 
@@ -387,7 +387,7 @@ function ConfigEditor({
     }
     setSaving(true);
     try {
-      await api.updateInstance(id, { config });
+      await api.updateInstance(id, { config: normalizeConfig(config) });
       toast.success("Configuration saved & pushed to agent");
     } catch (e) {
       toast.error((e as Error).message);
@@ -429,6 +429,16 @@ function ConfigEditor({
               value={config.defaultToken ?? ""}
               disabled={!canEdit}
               onChange={(e) => patch({ defaultToken: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Domain</Label>
+            <Input
+              className="font-mono"
+              placeholder="node.example.com"
+              value={config.domain ?? ""}
+              disabled={!canEdit}
+              onChange={(e) => patch({ domain: e.target.value })}
             />
           </div>
           <div className="space-y-2">
@@ -487,7 +497,6 @@ function ConfigEditor({
                   <TableHead className="min-w-32">Name</TableHead>
                   <TableHead className="w-24">Type</TableHead>
                   <TableHead className="min-w-40">Public bind (server)</TableHead>
-                  <TableHead className="min-w-40">Domain</TableHead>
                   <TableHead className="min-w-36">Token</TableHead>
                   <TableHead className="w-20 text-center">nodelay</TableHead>
                   <TableHead className="w-28 text-right">Traffic</TableHead>
@@ -536,15 +545,6 @@ function ConfigEditor({
                         {publicBindIssue && (
                           <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <Input
-                          className="h-8 font-mono"
-                          placeholder="ssh.example.com"
-                          value={svc.domain ?? ""}
-                          disabled={!canEdit}
-                          onChange={(e) => updateService(i, { domain: e.target.value })}
-                        />
                       </TableCell>
                       <TableCell>
                         <Input

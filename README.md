@@ -132,9 +132,9 @@ and `AGENT_TOKEN` in the environment instead (see `agent/agent.env.example`).
 
 ## Config Model
 
-Each instance has a control channel (`bind_addr`, an auto-generated
-`default_token`, transport: `tcp` / `tls` / `noise` / `websocket`) and a list of
-services. A service maps a public `bind_addr` on the server. Client-side
+Each instance has a control channel (`bind_addr`, an optional operator-facing
+domain, an auto-generated `default_token`, transport: `tcp` / `tls` / `noise` /
+`websocket`) and a list of services. A service maps a public `bind_addr` on the server. Client-side
 `local_addr` and `client.toml` are managed outside this panel. The Worker sends
 the server-side model to the agent as structured JSON; the agent converts it to
 rathole's typed config and calls the patched embedded API directly.

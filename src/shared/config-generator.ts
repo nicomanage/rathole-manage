@@ -2,11 +2,32 @@
 //
 // Reference: https://github.com/rapiz1/rathole#configuration
 
-import type { RatholeConfig } from "./types";
+import type { RatholeConfig, RatholeService } from "./types";
 
 export interface ValidationIssue {
   path: string;
   message: string;
+}
+
+type LegacyRatholeService = RatholeService & { domain?: string };
+
+/**
+ * Normalize persisted/API configs before editing or saving.
+ *
+ * Older UI versions stored `domain` on each service. Domain is now server-level
+ * metadata, so keep the first legacy value as the instance domain and drop the
+ * per-service field from future writes.
+ */
+export function normalizeConfig(config: RatholeConfig): RatholeConfig {
+  const legacyServices = config.services as LegacyRatholeService[];
+  const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
+  const services = legacyServices.map(({ domain: _domain, ...service }) => service);
+
+  return {
+    ...config,
+    domain: config.domain ?? legacyDomain,
+    services,
+  };
 }
 
 function validateHostPort(value: string, ipv6Example: string): string | null {

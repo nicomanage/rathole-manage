@@ -63,6 +63,7 @@ pub struct WebsocketConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RatholeConfig {
     pub bind_addr: String,
+    pub domain: Option<String>,
     pub default_token: Option<String>,
     pub transport: TransportType,
     pub tls: Option<TlsConfig>,
