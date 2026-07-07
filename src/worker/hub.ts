@@ -371,6 +371,7 @@ export class RatholeHub extends DurableObject<Env> {
         inst.processState = msg.processState;
         if (msg.metrics) inst.metrics = { ...inst.metrics, ...msg.metrics };
         if (msg.serviceStatus) inst.serviceStatus = msg.serviceStatus;
+        if (msg.traffic) inst.traffic = msg.traffic;
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
         break;

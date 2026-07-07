@@ -229,6 +229,7 @@ async fn run_daemon() -> Result<()> {
                 guard.refresh().await;
                 let state = guard.state();
                 let statuses = guard.service_status();
+                let traffic = guard.traffic();
                 drop(guard);
                 let metrics = Metrics {
                     cpu_percent: collector.cpu_percent(),
@@ -243,6 +244,7 @@ async fn run_daemon() -> Result<()> {
                     process_state: state,
                     metrics: Some(metrics),
                     service_status: statuses,
+                    traffic,
                 };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
@@ -391,6 +393,7 @@ async fn handle_hub_message(
             };
             let state = guard.state();
             let statuses = guard.service_status();
+            let traffic = guard.traffic();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
@@ -401,6 +404,7 @@ async fn handle_hub_message(
                 process_state: state,
                 metrics: None,
                 service_status: statuses,
+                traffic,
             });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),

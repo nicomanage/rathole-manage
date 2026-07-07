@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::{
     ProcessState, RatholeConfig, RatholeService, ServiceRef, ServiceType as WireServiceType,
-    TransportType as WireTransportType,
+    TrafficStat, TransportType as WireTransportType,
 };
 
 struct Running {
@@ -81,6 +81,31 @@ impl Runner {
             self.services
                 .iter()
                 .map(|svc| (svc.name.clone(), online))
+                .collect(),
+        )
+    }
+
+    /// Cumulative traffic per service, sourced from the patched rathole's
+    /// counters (keyed by public bind address) and mapped back to service names.
+    pub fn traffic(&self) -> Option<HashMap<String, TrafficStat>> {
+        if self.services.is_empty() {
+            return None;
+        }
+        let snapshot = rathole::traffic_snapshot();
+        Some(
+            self.services
+                .iter()
+                .map(|svc| {
+                    // rathole records (to_visitor, from_visitor) = (out, in).
+                    let (out, inn) = snapshot.get(&svc.bind_addr).copied().unwrap_or((0, 0));
+                    (
+                        svc.name.clone(),
+                        TrafficStat {
+                            bytes_in: inn,
+                            bytes_out: out,
+                        },
+                    )
+                })
                 .collect(),
         )
     }

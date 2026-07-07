@@ -12,7 +12,7 @@ index ca85fc2..ebf6110 100644
          for (name, s) in &mut server.services {
              s.name = name.clone();
 diff --git a/src/lib.rs b/src/lib.rs
-index 7fb2fa6..08bd43a 100644
+index 7fb2fa6..37d53f9 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,5 +1,5 @@
@@ -22,7 +22,38 @@ index 7fb2fa6..08bd43a 100644
  mod config_watcher;
  mod constants;
  mod helper;
-@@ -114,6 +114,21 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
+@@ -16,6 +16,30 @@ use anyhow::Result;
+ use tokio::sync::{broadcast, mpsc};
+ use tracing::{debug, info};
+ 
++use std::collections::HashMap as TrafficMap;
++use std::sync::{Mutex as TrafficMutex, OnceLock};
++
++/// Cumulative per-service traffic keyed by the service's public bind address.
++/// Values are (bytes_to_visitor, bytes_from_visitor). Populated by the server
++/// data path and read out via `traffic_snapshot`.
++fn traffic_registry() -> &'static TrafficMutex<TrafficMap<String, (u64, u64)>> {
++    static REG: OnceLock<TrafficMutex<TrafficMap<String, (u64, u64)>>> = OnceLock::new();
++    REG.get_or_init(|| TrafficMutex::new(TrafficMap::new()))
++}
++
++/// Snapshot of cumulative traffic per public bind address since process start.
++pub fn traffic_snapshot() -> TrafficMap<String, (u64, u64)> {
++    traffic_registry().lock().unwrap().clone()
++}
++
++/// Accumulate observed bytes for a public bind address (called by the server).
++pub(crate) fn record_traffic(bind_addr: &str, to_visitor: u64, from_visitor: u64) {
++    let mut reg = traffic_registry().lock().unwrap();
++    let entry = reg.entry(bind_addr.to_string()).or_insert((0, 0));
++    entry.0 = entry.0.saturating_add(to_visitor);
++    entry.1 = entry.1.saturating_add(from_visitor);
++}
++
+ #[cfg(feature = "client")]
+ mod client;
+ #[cfg(feature = "client")]
+@@ -114,6 +138,21 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
      Ok(())
  }
  
@@ -44,3 +75,30 @@ index 7fb2fa6..08bd43a 100644
  async fn run_instance(
      config: Config,
      args: Cli,
+diff --git a/src/server.rs b/src/server.rs
+index a36e3c2..ba373c5 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -634,6 +634,7 @@ async fn run_tcp_connection_pool<T: Transport>(
+     data_ch_req_tx: mpsc::UnboundedSender<bool>,
+     shutdown_rx: broadcast::Receiver<bool>,
+ ) -> Result<()> {
++    let traffic_key = bind_addr.clone();
+     let mut visitor_rx = tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx);
+     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
+ 
+@@ -641,8 +642,13 @@ async fn run_tcp_connection_pool<T: Transport>(
+         loop {
+             if let Some(mut ch) = data_ch_rx.recv().await {
+                 if ch.write_all(&cmd).await.is_ok() {
++                    let traffic_key = traffic_key.clone();
+                     tokio::spawn(async move {
+-                        let _ = copy_bidirectional(&mut ch, &mut visitor).await;
++                        if let Ok((to_visitor, from_visitor)) =
++                            copy_bidirectional(&mut ch, &mut visitor).await
++                        {
++                            crate::record_traffic(&traffic_key, to_visitor, from_visitor);
++                        }
+                     });
+                     break;
+                 } else {

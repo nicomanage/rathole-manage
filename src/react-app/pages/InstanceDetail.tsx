@@ -8,6 +8,7 @@ import type {
   InstanceView,
   RatholeConfig,
   RatholeService,
+  TrafficStat,
   TransportType,
 } from "@shared/types";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,7 @@ import {
 } from "@/components/ui/dialog";
 import { CodeBlock } from "@/components/CodeBlock";
 import { StatusDot, ProcessBadge } from "@/components/StatusBadge";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import {
   ArrowLeft,
   Play,
@@ -52,6 +53,7 @@ import {
   Clock,
   Tag,
   RefreshCw,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -117,6 +119,7 @@ export function InstanceDetail() {
           <h1 className="flex items-center gap-2.5 text-2xl font-semibold tracking-tight">
             <StatusDot status={instance.status} />
             {instance.name}
+            {isAdmin && <EditNodeDialog id={id} name={instance.name} />}
           </h1>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <ProcessBadge state={instance.processState} />
@@ -172,6 +175,7 @@ export function InstanceDetail() {
             id={id}
             initial={instance.config}
             serviceStatus={instance.serviceStatus}
+            traffic={instance.traffic}
             online={instance.status === "online"}
             canEdit={isAdmin}
           />
@@ -241,12 +245,14 @@ function ConfigEditor({
   id,
   initial,
   serviceStatus,
+  traffic,
   online,
   canEdit,
 }: {
   id: string;
   initial: RatholeConfig;
   serviceStatus?: Record<string, boolean>;
+  traffic?: Record<string, TrafficStat>;
   online: boolean;
   canEdit: boolean;
 }) {
@@ -405,8 +411,10 @@ function ConfigEditor({
                   <TableHead className="min-w-32">Name</TableHead>
                   <TableHead className="w-24">Type</TableHead>
                   <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  <TableHead className="min-w-40">Domain</TableHead>
                   <TableHead className="min-w-36">Token</TableHead>
                   <TableHead className="w-20 text-center">nodelay</TableHead>
+                  <TableHead className="w-28 text-right">Traffic</TableHead>
                   {canEdit && <TableHead className="w-12" />}
                 </TableRow>
               </TableHeader>
@@ -456,6 +464,15 @@ function ConfigEditor({
                       <TableCell>
                         <Input
                           className="h-8 font-mono"
+                          placeholder="ssh.example.com"
+                          value={svc.domain ?? ""}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { domain: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
                           placeholder="inherits default"
                           value={svc.token ?? ""}
                           disabled={!canEdit}
@@ -468,6 +485,15 @@ function ConfigEditor({
                           disabled={!canEdit}
                           onCheckedChange={(v) => updateService(i, { nodelay: v })}
                         />
+                      </TableCell>
+                      <TableCell className="pt-3 text-right font-mono text-xs whitespace-nowrap">
+                        <span className="text-success" title="Downloaded by visitors">
+                          ↓ {formatBytes(traffic?.[svc.name]?.bytesOut)}
+                        </span>
+                        <br />
+                        <span className="text-muted-foreground" title="Uploaded by visitors">
+                          ↑ {formatBytes(traffic?.[svc.name]?.bytesIn)}
+                        </span>
                       </TableCell>
                       {canEdit && (
                         <TableCell>
@@ -625,6 +651,67 @@ function AgentSetup({
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function EditNodeDialog({ id, name }: { id: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState(name);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) setValue(name);
+  }, [open, name]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await api.updateInstance(id, { name: value });
+      toast.success("Node renamed");
+      setOpen(false);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 text-muted-foreground"
+        title="Rename node"
+        onClick={() => setOpen(true)}
+      >
+        <Pencil className="h-4 w-4" />
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename node</DialogTitle>
+          <DialogDescription>Set a display name for this node.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="node-name">Node name</Label>
+          <Input
+            id="node-name"
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="edge-tokyo-01"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button onClick={save} disabled={busy || !value.trim() || value === name}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

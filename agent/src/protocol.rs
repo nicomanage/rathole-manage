@@ -118,6 +118,14 @@ pub struct Metrics {
     pub config_in_sync: Option<bool>,
 }
 
+/// Cumulative bytes for one service.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficStat {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
 /// Messages this agent sends up to the hub.
 #[derive(Debug, Clone, Serialize)]
 #[serde(
@@ -137,6 +145,8 @@ pub enum AgentToHub {
         metrics: Option<Metrics>,
         #[serde(skip_serializing_if = "Option::is_none")]
         service_status: Option<HashMap<String, bool>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        traffic: Option<HashMap<String, TrafficStat>>,
     },
     Log {
         line: String,

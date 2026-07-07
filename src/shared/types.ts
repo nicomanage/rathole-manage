@@ -14,6 +14,12 @@ export interface RatholeService {
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;
   nodelay?: boolean;
+  /**
+   * Operator-facing domain for this service (e.g. "ssh.example.com"). Metadata
+   * only — rathole forwards raw TCP/UDP; the domain documents where the service
+   * is reached and is shown in the panel.
+   */
+  domain?: string;
 }
 
 export interface TlsConfig {
@@ -132,8 +138,19 @@ export interface Instance {
    * Keyed by service name.
    */
   serviceStatus?: Record<string, boolean>;
+  /**
+   * Cumulative per-service traffic (since the agent process started), keyed by
+   * service name.
+   */
+  traffic?: Record<string, TrafficStat>;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Cumulative bytes for one service. in = uploaded by visitors, out = downloaded. */
+export interface TrafficStat {
+  bytesIn: number;
+  bytesOut: number;
 }
 
 /** Instance shape sent to the browser (agentToken redacted unless requested). */
@@ -152,6 +169,8 @@ export type AgentToHub =
       metrics?: AgentMetrics;
       /** Per-service reachability, keyed by service name. */
       serviceStatus?: Record<string, boolean>;
+      /** Cumulative per-service traffic, keyed by service name. */
+      traffic?: Record<string, TrafficStat>;
     }
   | { type: "log"; line: string; stream?: "stdout" | "stderr"; ts?: number }
   | { type: "config_ack"; ok: boolean; error?: string }
