@@ -217,7 +217,8 @@ async fn run_daemon() -> Result<()> {
 
     // Route all tracing (agent + embedded rathole) into a channel for streaming,
     // and into the service-status layer. Keep the filter at info or lower so
-    // rathole's "Control channel established/shutdown" events are observed.
+    // rathole's per-service `handle` spans are recorded (their open/close drives
+    // service online state).
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<String>();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));

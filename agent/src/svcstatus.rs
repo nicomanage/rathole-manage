@@ -1,53 +1,93 @@
-//! Per-service online state derived from rathole's own `tracing` events — no
-//! port probing. rathole instruments its control-channel handling with a span
-//! carrying `service = <name>` and logs "Control channel established" when a
-//! client connects and "Control channel shutdown" when it disconnects. This
-//! layer watches those events and maintains a name -> online map.
+//! Per-service online state derived from rathole's own instrumentation — no
+//! port probing and no log-text matching.
+//!
+//! rathole wraps each control channel in a span `handle` carrying
+//! `service = <name>` (`ControlChannelHandle::new`), and that span is propagated
+//! into the long-lived `run` task via `.instrument(Span::current())`. So the
+//! span's lifetime == the control channel's lifetime. We simply count live
+//! `handle` spans per service: a service is online while at least one is open.
+//! Counting (rather than a bool) keeps it correct when a client reconnects and
+//! briefly overlaps the previous channel.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use tracing::field::{Field, Visit};
-use tracing::span::Attributes;
-use tracing::{Event, Id, Subscriber};
+use tracing::span::{Attributes, Id};
+use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
+
+/// The rathole span whose lifetime tracks a control channel.
+const HANDLE_SPAN: &str = "handle";
 
 /// Shared name -> online map, read by the status reporter.
 pub type ServiceStatus = Arc<Mutex<HashMap<String, bool>>>;
 
-/// The `service` field value captured from a rathole span.
+/// Service name recorded on a `handle` span, so we can find it again on close.
 #[derive(Clone)]
 struct SpanService(String);
 
 pub struct ServiceStatusLayer {
-    status: ServiceStatus,
+    online: ServiceStatus,
+    /// Live `handle` span count per service (internal).
+    counts: Mutex<HashMap<String, u32>>,
 }
 
 impl ServiceStatusLayer {
-    pub fn new(status: ServiceStatus) -> Self {
-        Self { status }
+    pub fn new(online: ServiceStatus) -> Self {
+        Self {
+            online,
+            counts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn set_online(&self, service: &str, up: bool) {
+        self.online.lock().unwrap().insert(service.to_string(), up);
+    }
+
+    fn opened(&self, service: String) {
+        let up = {
+            let mut counts = self.counts.lock().unwrap();
+            let n = counts.entry(service.clone()).or_insert(0);
+            *n += 1;
+            *n > 0
+        };
+        self.set_online(&service, up);
+    }
+
+    fn closed(&self, service: String) {
+        let up = {
+            let mut counts = self.counts.lock().unwrap();
+            let n = counts.entry(service.clone()).or_insert(0);
+            *n = n.saturating_sub(1);
+            *n > 0
+        };
+        self.set_online(&service, up);
     }
 }
 
-/// Extracts a single named field's value (Display or str) as a String.
-struct FieldGrabber<'a> {
-    name: &'a str,
-    value: Option<String>,
-}
+/// Pull the `service` field off a span's attributes.
+fn service_of(attrs: &Attributes<'_>) -> Option<String> {
+    use std::fmt;
+    use tracing::field::{Field, Visit};
 
-impl Visit for FieldGrabber<'_> {
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if self.value.is_none() && field.name() == self.name {
-            self.value = Some(format!("{value:?}"));
+    struct Grab(Option<String>);
+    impl Visit for Grab {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if self.0.is_none() && field.name() == "service" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "service" {
+                self.0 = Some(value.to_string());
+            }
         }
     }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == self.name {
-            self.value = Some(value.to_string());
-        }
-    }
+
+    let mut grab = Grab(None);
+    attrs.record(&mut grab);
+    grab.0
 }
 
 impl<S> Layer<S> for ServiceStatusLayer
@@ -55,43 +95,25 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let mut grab = FieldGrabber {
-            name: "service",
-            value: None,
-        };
-        attrs.record(&mut grab);
-        if let (Some(service), Some(span)) = (grab.value, ctx.span(id)) {
-            span.extensions_mut().insert(SpanService(service));
+        if attrs.metadata().name() != HANDLE_SPAN {
+            return;
         }
+        let Some(service) = service_of(attrs) else {
+            return;
+        };
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(SpanService(service.clone()));
+        }
+        self.opened(service);
     }
 
-    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let mut grab = FieldGrabber {
-            name: "message",
-            value: None,
-        };
-        event.record(&mut grab);
-        let Some(message) = grab.value else {
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        let Some(span) = ctx.span(&id) else {
             return;
         };
-
-        let online = if message.contains("Control channel established") {
-            true
-        } else if message.contains("Control channel shutdown")
-            || message.contains("Dropping previous control channel")
-        {
-            false
-        } else {
-            return;
-        };
-
-        // Resolve the service name from the enclosing span scope.
-        let service = ctx.event_span(event).and_then(|span| {
-            span.scope()
-                .find_map(|s| s.extensions().get::<SpanService>().map(|svc| svc.0.clone()))
-        });
+        let service = span.extensions().get::<SpanService>().map(|s| s.0.clone());
         if let Some(service) = service {
-            self.status.lock().unwrap().insert(service, online);
+            self.closed(service);
         }
     }
 }
@@ -101,52 +123,57 @@ mod tests {
     use super::*;
     use tracing_subscriber::prelude::*;
 
-    fn status_after(body: impl FnOnce()) -> HashMap<String, bool> {
+    fn with_layer(body: impl FnOnce(&ServiceStatus)) {
         let status: ServiceStatus = Arc::new(Mutex::new(HashMap::new()));
         let subscriber =
             tracing_subscriber::registry().with(ServiceStatusLayer::new(status.clone()));
-        tracing::subscriber::with_default(subscriber, body);
-        let guard = status.lock().unwrap();
-        guard.clone()
+        tracing::subscriber::with_default(subscriber, || body(&status));
+    }
+
+    fn online(status: &ServiceStatus, name: &str) -> Option<bool> {
+        status.lock().unwrap().get(name).copied()
     }
 
     #[test]
-    fn established_marks_service_online() {
-        let map = status_after(|| {
-            // Mirror rathole: a span carrying `service`, then the lifecycle log.
-            let span = tracing::info_span!("handle", service = %"ssh");
-            let _guard = span.enter();
-            tracing::info!("Control channel established");
+    fn handle_span_lifetime_drives_online_state() {
+        with_layer(|status| {
+            {
+                let span = tracing::info_span!("handle", service = %"ssh");
+                let _enter = span.enter();
+                assert_eq!(online(status, "ssh"), Some(true));
+            }
+            // Span dropped → control channel closed.
+            assert_eq!(online(status, "ssh"), Some(false));
         });
-        assert_eq!(map.get("ssh"), Some(&true));
     }
 
     #[test]
-    fn shutdown_marks_service_offline() {
-        let map = status_after(|| {
-            let span = tracing::info_span!("handle", service = %"web");
-            let _guard = span.enter();
-            tracing::info!("Control channel established");
-            tracing::info!("Control channel shutdown");
+    fn overlapping_reconnect_stays_online() {
+        with_layer(|status| {
+            let first = tracing::info_span!("handle", service = %"web");
+            assert_eq!(online(status, "web"), Some(true));
+            // Client reconnects: a new channel opens before the old one closes.
+            let second = tracing::info_span!("handle", service = %"web");
+            drop(first);
+            assert_eq!(online(status, "web"), Some(true));
+            drop(second);
+            assert_eq!(online(status, "web"), Some(false));
         });
-        assert_eq!(map.get("web"), Some(&false));
     }
 
     #[test]
-    fn unrelated_events_are_ignored() {
-        let map = status_after(|| {
-            let span = tracing::info_span!("handle", service = %"db");
-            let _guard = span.enter();
-            tracing::info!("some other message");
+    fn non_handle_spans_are_ignored() {
+        with_layer(|status| {
+            let _span = tracing::info_span!("run", service = %"db").entered();
+            assert_eq!(online(status, "db"), None);
         });
-        assert!(map.get("db").is_none());
     }
 
     #[test]
-    fn events_without_a_service_span_are_ignored() {
-        let map = status_after(|| {
-            tracing::info!("Control channel established");
+    fn handle_span_without_service_is_ignored() {
+        with_layer(|status| {
+            let _span = tracing::info_span!("handle").entered();
+            assert!(status.lock().unwrap().is_empty());
         });
-        assert!(map.is_empty());
     }
 }
