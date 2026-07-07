@@ -72,15 +72,21 @@ impl Runner {
         }
     }
 
+    /// Per-service online state: a service is online only when rathole is
+    /// running *and* a client's control channel is currently connected for it.
     pub fn service_status(&self) -> Option<HashMap<String, bool>> {
         if self.services.is_empty() {
             return None;
         }
-        let online = self.is_running();
+        let connected = if self.is_running() {
+            rathole::connected_services()
+        } else {
+            Default::default()
+        };
         Some(
             self.services
                 .iter()
-                .map(|svc| (svc.name.clone(), online))
+                .map(|svc| (svc.name.clone(), connected.contains(&svc.name)))
                 .collect(),
         )
     }

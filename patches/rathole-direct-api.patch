@@ -12,7 +12,7 @@ index ca85fc2..ebf6110 100644
          for (name, s) in &mut server.services {
              s.name = name.clone();
 diff --git a/src/lib.rs b/src/lib.rs
-index 7fb2fa6..37d53f9 100644
+index 7fb2fa6..2d29abd 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,5 +1,5 @@
@@ -22,11 +22,12 @@ index 7fb2fa6..37d53f9 100644
  mod config_watcher;
  mod constants;
  mod helper;
-@@ -16,6 +16,30 @@ use anyhow::Result;
+@@ -16,6 +16,65 @@ use anyhow::Result;
  use tokio::sync::{broadcast, mpsc};
  use tracing::{debug, info};
  
 +use std::collections::HashMap as TrafficMap;
++use std::collections::HashSet as ServiceSet;
 +use std::sync::{Mutex as TrafficMutex, OnceLock};
 +
 +/// Cumulative per-service traffic keyed by the service's public bind address.
@@ -50,10 +51,44 @@ index 7fb2fa6..37d53f9 100644
 +    entry.1 = entry.1.saturating_add(from_visitor);
 +}
 +
++/// Live control-channel count per service name. A service has a connected
++/// client while its count is greater than zero. Counting (rather than a bool)
++/// keeps it correct across reconnects that briefly overlap the old channel.
++fn connection_registry() -> &'static TrafficMutex<TrafficMap<String, u32>> {
++    static REG: OnceLock<TrafficMutex<TrafficMap<String, u32>>> = OnceLock::new();
++    REG.get_or_init(|| TrafficMutex::new(TrafficMap::new()))
++}
++
++/// Names of services that currently have at least one connected client.
++pub fn connected_services() -> ServiceSet<String> {
++    connection_registry()
++        .lock()
++        .unwrap()
++        .iter()
++        .filter(|(_, &n)| n > 0)
++        .map(|(name, _)| name.clone())
++        .collect()
++}
++
++pub(crate) fn service_connect(name: &str) {
++    *connection_registry()
++        .lock()
++        .unwrap()
++        .entry(name.to_string())
++        .or_insert(0) += 1;
++}
++
++pub(crate) fn service_disconnect(name: &str) {
++    let mut reg = connection_registry().lock().unwrap();
++    if let Some(n) = reg.get_mut(name) {
++        *n = n.saturating_sub(1);
++    }
++}
++
  #[cfg(feature = "client")]
  mod client;
  #[cfg(feature = "client")]
-@@ -114,6 +138,21 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
+@@ -114,6 +173,21 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
      Ok(())
  }
  
@@ -76,10 +111,28 @@ index 7fb2fa6..37d53f9 100644
      config: Config,
      args: Cli,
 diff --git a/src/server.rs b/src/server.rs
-index a36e3c2..ba373c5 100644
+index a36e3c2..52a3ee5 100644
 --- a/src/server.rs
 +++ b/src/server.rs
-@@ -634,6 +634,7 @@ async fn run_tcp_connection_pool<T: Transport>(
+@@ -407,6 +407,9 @@ where
+         // Create a shutdown channel
+         let (shutdown_tx, shutdown_rx) = broadcast::channel::<bool>(1);
+ 
++        let conn_key = service.name.clone();
++        crate::service_connect(&conn_key);
++
+         // Store data channels
+         let (data_ch_tx, data_ch_rx) = mpsc::channel(CHAN_SIZE * 2);
+ 
+@@ -476,6 +479,7 @@ where
+                 if let Err(err) = ch.run().await {
+                     error!("{:#}", err);
+                 }
++                crate::service_disconnect(&conn_key);
+             }
+             .instrument(Span::current()),
+         );
+@@ -634,6 +638,7 @@ async fn run_tcp_connection_pool<T: Transport>(
      data_ch_req_tx: mpsc::UnboundedSender<bool>,
      shutdown_rx: broadcast::Receiver<bool>,
  ) -> Result<()> {
@@ -87,7 +140,7 @@ index a36e3c2..ba373c5 100644
      let mut visitor_rx = tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx);
      let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
  
-@@ -641,8 +642,13 @@ async fn run_tcp_connection_pool<T: Transport>(
+@@ -641,8 +646,13 @@ async fn run_tcp_connection_pool<T: Transport>(
          loop {
              if let Some(mut ch) = data_ch_rx.recv().await {
                  if ch.write_all(&cmd).await.is_ok() {
