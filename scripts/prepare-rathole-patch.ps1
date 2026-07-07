@@ -4,11 +4,23 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version = "0.5.0"
 $tmp = Join-Path $root ".tmp-rathole-$version"
 $dest = Join-Path $root "vendor\rathole"
+$fetch = Join-Path $tmp "fetch"
 
 Remove-Item -Recurse -Force $tmp, $dest -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $tmp, (Join-Path $root "vendor") | Out-Null
+New-Item -ItemType Directory -Force $fetch, (Join-Path $root "vendor") | Out-Null
 
-Push-Location (Join-Path $root "agent")
+$manifest = @"
+[package]
+name = "rathole-source-fetch"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+rathole = "=$version"
+"@
+Set-Content -LiteralPath (Join-Path $fetch "Cargo.toml") -Value $manifest -NoNewline
+
+Push-Location $fetch
 try {
     cargo vendor --versioned-dirs (Join-Path $tmp "vendor") | Out-Null
 } finally {
