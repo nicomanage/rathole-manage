@@ -87,9 +87,13 @@ export function Dashboard() {
                     <span className="text-muted-foreground">Services</span>
                     <Badge variant="secondary">{inst.config.services.length}</Badge>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Bind</span>
-                    <span className="font-mono text-xs">{inst.config.bindAddr}</span>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-muted-foreground">
+                      {inst.config.domain?.trim() ? "Domain" : "Bind"}
+                    </span>
+                    <span className="truncate font-mono text-xs" title={inst.config.domain || inst.config.bindAddr}>
+                      {inst.config.domain?.trim() || inst.config.bindAddr}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Last seen</span>
