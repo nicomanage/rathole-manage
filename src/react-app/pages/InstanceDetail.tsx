@@ -113,6 +113,14 @@ export function InstanceDetail() {
     );
   }
 
+  // Control buttons are mutually exclusive by process state: Start only when
+  // not running; Stop/Restart only when running.
+  const controls = {
+    online: instance.status === "online",
+    running: instance.processState === "running",
+    busy: pendingCommand !== null,
+  };
+
   return (
     <div className="space-y-6">
       <Button variant="ghost" size="sm" onClick={() => nav("/")}>
@@ -140,7 +148,7 @@ export function InstanceDetail() {
             <Button
               variant="outline"
               size="sm"
-              disabled={instance.status !== "online" || pendingCommand !== null}
+              disabled={!controls.online || controls.busy || controls.running}
               onClick={() => void runCommand("start")}
             >
               <Play className="h-4 w-4" /> Start
@@ -148,7 +156,7 @@ export function InstanceDetail() {
             <Button
               variant="outline"
               size="sm"
-              disabled={instance.status !== "online" || pendingCommand !== null}
+              disabled={!controls.online || controls.busy || !controls.running}
               onClick={() => void runCommand("restart")}
             >
               <RotateCw className="h-4 w-4" /> Restart
@@ -156,7 +164,7 @@ export function InstanceDetail() {
             <Button
               variant="outline"
               size="sm"
-              disabled={instance.status !== "online" || pendingCommand !== null}
+              disabled={!controls.online || controls.busy || !controls.running}
               onClick={() => void runCommand("stop")}
             >
               <Square className="h-4 w-4" /> Stop
