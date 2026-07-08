@@ -3,7 +3,7 @@ name: apt-pages
 # Builds .deb packages of the agent (amd64 + arm64) and publishes a flat APT
 # repository to GitHub Pages, so nodes can install with:
 #
-#   echo "deb [trusted=yes] https://nicomanage.github.io/rathole-manage/apt ./" \
+#   echo "deb [trusted=yes] https://rathole-manage.reall.icu/apt ./" \
 #     | sudo tee /etc/apt/sources.list.d/rathole-agent.list
 #   sudo apt-get update && sudo apt-get install rathole-agent
 #
@@ -115,13 +115,14 @@ jobs:
 
       - name: Build flat APT repo + landing page
         env:
-          BASE_URL: ${{ steps.pages.outputs.base_url }}
+          BASE_URL: https://rathole-manage.reall.icu/
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y dpkg-dev apt-utils
 
           mkdir -p site/apt
+          printf '%s\n' 'rathole-manage.reall.icu' > site/CNAME
           cp debs/*.deb site/apt/
 
           pushd site/apt
