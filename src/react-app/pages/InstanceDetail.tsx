@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
-import { normalizeConfig, validateConfig } from "@shared/config-generator";
+import { generateClientToml, normalizeConfig, validateConfig } from "@shared/config-generator";
 import type {
   AgentCommand,
   InstanceView,
@@ -166,6 +166,7 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
+          <TabsTrigger value="client">Client config</TabsTrigger>
           <TabsTrigger value="traffic">Traffic</TabsTrigger>
           <TabsTrigger value="logs">Live logs</TabsTrigger>
           <TabsTrigger value="agent">Agent setup</TabsTrigger>
@@ -180,6 +181,9 @@ export function InstanceDetail() {
             online={instance.status === "online"}
             canEdit={isAdmin}
           />
+        </TabsContent>
+        <TabsContent value="client">
+          <ClientConfig config={instance.config} />
         </TabsContent>
         <TabsContent value="traffic">
           <MonthlyTraffic monthly={instance.monthlyTraffic} live={instance.traffic} />
@@ -615,6 +619,21 @@ function ConfigEditor({
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ClientConfig({ config }: { config: RatholeConfig }) {
+  const toml = generateClientToml(config);
+  return (
+    <div className="max-w-3xl space-y-3">
+      <p className="text-sm text-muted-foreground">
+        Run this <code className="font-mono">client.toml</code> with{" "}
+        <code className="font-mono">rathole client.toml</code> on the machine behind NAT to expose
+        its local services. The Worker manages the server side; adjust each{" "}
+        <code className="font-mono">local_addr</code> to point at your local service.
+      </p>
+      <CodeBlock code={toml} filename="client.toml" />
     </div>
   );
 }
