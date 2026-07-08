@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { defaultConfig, generateClientToml, validateConfig } from "./config-generator";
+import {
+  defaultConfig,
+  generateClientGlobalToml,
+  generateClientServiceToml,
+  generateClientToml,
+  validateConfig,
+} from "./config-generator";
 import { hashServerConfig } from "../worker/server-config";
 import type { RatholeConfig } from "./types";
 
@@ -87,6 +93,28 @@ describe("generateClientToml", () => {
       config({ services: [{ name: "my nas", type: "tcp", bindAddr: "0.0.0.0:1" }] }),
     );
     expect(toml).toContain('[client.services."my nas"]');
+  });
+});
+
+describe("split client config", () => {
+  it("global section has [client] but no service tables", () => {
+    const toml = generateClientGlobalToml(config({ domain: "tunnel.example.com" }));
+    expect(toml).toContain("[client]");
+    expect(toml).toContain('remote_addr = "tunnel.example.com:2333"');
+    expect(toml).not.toContain("[client.services");
+  });
+
+  it("service block has only that service's table", () => {
+    const toml = generateClientServiceToml({
+      name: "ssh",
+      type: "tcp",
+      bindAddr: "0.0.0.0:5202",
+      token: "svc-token",
+    });
+    expect(toml).toContain("[client.services.ssh]");
+    expect(toml).toContain('local_addr = "127.0.0.1:22"');
+    expect(toml).toContain('token = "svc-token"');
+    expect(toml).not.toContain("[client]");
   });
 });
 

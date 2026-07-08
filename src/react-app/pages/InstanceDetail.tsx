@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
-import { generateClientToml, normalizeConfig, validateConfig } from "@shared/config-generator";
+import {
+  generateClientGlobalToml,
+  generateClientServiceToml,
+  normalizeConfig,
+  validateConfig,
+} from "@shared/config-generator";
 import type {
   AgentCommand,
   InstanceView,
@@ -624,16 +629,43 @@ function ConfigEditor({
 }
 
 function ClientConfig({ config }: { config: RatholeConfig }) {
-  const toml = generateClientToml(config);
   return (
-    <div className="max-w-3xl space-y-3">
+    <div className="max-w-3xl space-y-6">
       <p className="text-sm text-muted-foreground">
-        Run this <code className="font-mono">client.toml</code> with{" "}
-        <code className="font-mono">rathole client.toml</code> on the machine behind NAT to expose
-        its local services. The Worker manages the server side; adjust each{" "}
-        <code className="font-mono">local_addr</code> to point at your local service.
+        Assemble a <code className="font-mono">client.toml</code> and run it with{" "}
+        <code className="font-mono">rathole client.toml</code> on the machine behind NAT. Combine the
+        global section with the blocks for the services you want to expose, and adjust each{" "}
+        <code className="font-mono">local_addr</code> to your local service.
       </p>
-      <CodeBlock code={toml} filename="client.toml" />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Global client config</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <CodeBlock code={generateClientGlobalToml(config)} filename="client.toml" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Service blocks ({config.services.length})</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {config.services.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No services yet. Add services in the Configuration tab first.
+            </p>
+          ) : (
+            config.services.map((svc, i) => (
+              <div key={i} className="space-y-1.5">
+                <p className="font-mono text-xs text-muted-foreground">{svc.name}</p>
+                <CodeBlock code={generateClientServiceToml(svc)} language="toml" />
+              </div>
+            ))
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
