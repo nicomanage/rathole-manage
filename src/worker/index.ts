@@ -311,6 +311,11 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     const token = url.searchParams.get("token") ?? "";
     const inst = await stub.getInstance(instanceId);
     if (!inst || inst.agentToken !== token) return unauthorized();
+    const ip =
+      req.headers.get("cf-connecting-ip") ??
+      req.headers.get("x-real-ip") ??
+      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    if (ip) await stub.recordAgentIp(instanceId, ip);
     return stub.fetch(req);
   }
 

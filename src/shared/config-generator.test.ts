@@ -80,6 +80,21 @@ describe("generateClientToml", () => {
     expect(toml).toContain('remote_addr = "your-server-host:2333"');
   });
 
+  it("uses the node public IP when no domain is set", () => {
+    const toml = generateClientToml(config({ domain: undefined }), "203.0.113.7");
+    expect(toml).toContain('remote_addr = "203.0.113.7:2333"');
+  });
+
+  it("brackets an IPv6 public IP", () => {
+    const toml = generateClientToml(config({ domain: undefined }), "2001:db8::1");
+    expect(toml).toContain('remote_addr = "[2001:db8::1]:2333"');
+  });
+
+  it("prefers the domain over the public IP", () => {
+    const toml = generateClientToml(config({ domain: "tunnel.example.com" }), "203.0.113.7");
+    expect(toml).toContain('remote_addr = "tunnel.example.com:2333"');
+  });
+
   it("includes noise transport with the remote public key", () => {
     const toml = generateClientToml(
       config({ transport: "noise", noise: { remotePublicKey: "abc123" } }),

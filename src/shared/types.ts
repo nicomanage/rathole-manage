@@ -127,6 +127,9 @@ export interface Instance {
    * machine-id). Lets a re-enrolling agent reclaim its instance idempotently.
    */
   enrollNodeId?: string;
+  /** Public IP the agent connects from (seen by the edge). Used as the client
+   * connection host when no domain is set. */
+  publicIp?: string;
   config: RatholeConfig;
   status: InstanceStatus;
   processState: ProcessState;

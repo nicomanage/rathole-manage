@@ -116,6 +116,15 @@ export class RatholeHub extends DurableObject<Env> {
     return this.instances.get(id);
   }
 
+  /** Record the public IP the agent connects from (used as a client host fallback). */
+  async recordAgentIp(id: string, ip: string): Promise<void> {
+    const inst = this.instances.get(id);
+    if (!inst || inst.publicIp === ip) return;
+    inst.publicIp = ip;
+    await this.persist(inst);
+    this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
+  }
+
   /** Find an instance previously enrolled by the given node id (for idempotent re-enroll). */
   async findInstanceByNodeId(nodeId: string): Promise<Instance | undefined> {
     for (const inst of this.instances.values()) {

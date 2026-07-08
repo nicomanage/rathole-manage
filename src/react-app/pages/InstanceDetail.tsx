@@ -188,7 +188,7 @@ export function InstanceDetail() {
           />
         </TabsContent>
         <TabsContent value="client">
-          <ClientConfig config={instance.config} />
+          <ClientConfig config={instance.config} publicIp={instance.publicIp} />
         </TabsContent>
         <TabsContent value="traffic">
           <MonthlyTraffic monthly={instance.monthlyTraffic} live={instance.traffic} />
@@ -628,7 +628,7 @@ function ConfigEditor({
   );
 }
 
-function ClientConfig({ config }: { config: RatholeConfig }) {
+function ClientConfig({ config, publicIp }: { config: RatholeConfig; publicIp?: string }) {
   return (
     <div className="max-w-3xl space-y-6">
       <p className="text-sm text-muted-foreground">
@@ -636,6 +636,13 @@ function ClientConfig({ config }: { config: RatholeConfig }) {
         <code className="font-mono">rathole client.toml</code> on the machine behind NAT. Combine the
         global section with the blocks for the services you want to expose, and adjust each{" "}
         <code className="font-mono">local_addr</code> to your local service.
+        {!config.domain?.trim() && publicIp && (
+          <>
+            {" "}
+            No domain is set, so <code className="font-mono">remote_addr</code> uses the node's public
+            IP (<code className="font-mono">{publicIp}</code>).
+          </>
+        )}
       </p>
 
       <Card>
@@ -643,7 +650,7 @@ function ClientConfig({ config }: { config: RatholeConfig }) {
           <CardTitle className="text-base">Global client config</CardTitle>
         </CardHeader>
         <CardContent>
-          <CodeBlock code={generateClientGlobalToml(config)} filename="client.toml" />
+          <CodeBlock code={generateClientGlobalToml(config, publicIp)} filename="client.toml" />
         </CardContent>
       </Card>
 
