@@ -193,6 +193,16 @@ diff --git a/src/server.rs b/src/server.rs
 index a36e3c2..1e78c14 100644
 --- a/src/server.rs
 +++ b/src/server.rs
+@@ -18,8 +18,8 @@ use rand::RngCore;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::time::Duration;
+ use tokio::io::{self, copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+-use tokio::net::{TcpListener, TcpStream, UdpSocket};
++use tokio::net::{TcpListener, UdpSocket};
+ use tokio::sync::{broadcast, mpsc, RwLock};
+ use tokio::time;
+ use tracing::{debug, error, info, info_span, instrument, warn, Instrument, Span};
 @@ -407,6 +407,9 @@ where
          // Create a shutdown channel
          let (shutdown_tx, shutdown_rx) = broadcast::channel::<bool>(1);
@@ -217,7 +227,8 @@ index a36e3c2..1e78c14 100644
      mut shutdown_rx: broadcast::Receiver<bool>,
 -) -> mpsc::Receiver<TcpStream> {
 +) -> mpsc::Receiver<crate::VirtualVisitor> {
-     let (tx, rx) = mpsc::channel(CHAN_SIZE);
+-    let (tx, rx) = mpsc::channel(CHAN_SIZE);
++    let (tx, rx) = mpsc::channel::<crate::VirtualVisitor>(CHAN_SIZE);
  
      tokio::spawn(async move {
 @@ -611,7 +615,7 @@ fn tcp_listen_and_send(
