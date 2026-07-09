@@ -18,8 +18,8 @@ use crate::http_proxy::{
     HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute,
 };
 use crate::protocol::{
-    ProcessState, RatholeConfig, RatholeService, ServiceRef, ServiceType as WireServiceType,
-    TrafficStat, TransportType as WireTransportType,
+    DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
+    ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
 };
 
 const HTTP_PROXY_BIND_ADDR: &str = "[::]:80";
@@ -131,7 +131,11 @@ impl Runner {
         )
     }
 
-    pub async fn apply_config(&mut self, config: RatholeConfig) -> Result<()> {
+    pub async fn apply_config(
+        &mut self,
+        config: RatholeConfig,
+        desired_state: Option<DesiredProcessState>,
+    ) -> Result<()> {
         let services = config
             .services
             .iter()
@@ -147,7 +151,8 @@ impl Runner {
         self.config = Some(server);
         self.last_error = None;
 
-        if self.services.is_empty() {
+        let should_run = !matches!(desired_state, Some(DesiredProcessState::Stopped));
+        if self.services.is_empty() || !should_run {
             self.stop().await;
             return Ok(());
         }

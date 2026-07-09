@@ -111,6 +111,13 @@ pub enum ProcessState {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DesiredProcessState {
+    Running,
+    Stopped,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentCommand {
@@ -207,6 +214,8 @@ pub enum HubToAgent {
         config_hash: String,
         #[serde(default)]
         services: Vec<ServiceRef>,
+        #[serde(default)]
+        desired_process_state: Option<DesiredProcessState>,
     },
     Command {
         command: AgentCommand,

@@ -53,6 +53,19 @@ const LOG_BUFFER_LIMIT = 300;
 
 type LogEntry = Extract<HubToBrowser, { type: "log" }>;
 
+function desiredStateForCommand(command: AgentCommand): Instance["desiredProcessState"] | undefined {
+  switch (command) {
+    case "stop":
+      return "stopped";
+    case "start":
+    case "restart":
+    case "reload":
+      return "running";
+    case "status":
+      return undefined;
+  }
+}
+
 /** Strip the agent token before sending an instance to a browser. */
 function toView(inst: Instance): InstanceView {
   const { agentToken, ...rest } = inst;
@@ -250,6 +263,14 @@ export class RatholeHub extends DurableObject<Env> {
   async sendCommand(id: string, command: AgentCommand): Promise<boolean> {
     const sockets = this.ctx.getWebSockets(`agent:${id}`);
     if (sockets.length === 0) return false;
+    const inst = this.instances.get(id);
+    if (!inst) return false;
+    const desiredProcessState = desiredStateForCommand(command);
+    if (desiredProcessState && inst.desiredProcessState !== desiredProcessState) {
+      inst.desiredProcessState = desiredProcessState;
+      await this.persist(inst);
+      this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
+    }
     const msg: HubToAgent = { type: "command", command };
     for (const ws of sockets) this.safeSend(ws, msg);
     return true;
@@ -363,6 +384,7 @@ export class RatholeHub extends DurableObject<Env> {
         inst.status = "online";
         inst.lastSeen = Date.now();
         inst.metrics = { ...inst.metrics, agentVersion: msg.agentVersion, hostname: msg.hostname };
+        inst.desiredProcessState ??= "running";
         await this.persist(inst);
         this.pushLog({
           type: "log",
@@ -454,7 +476,14 @@ export class RatholeHub extends DurableObject<Env> {
   private pushConfig(inst: Instance, only?: WebSocket) {
     const configHash = hashServerConfig(JSON.stringify(inst.config));
     const services = inst.config.services.map((s) => ({ name: s.name, bindAddr: s.bindAddr }));
-    const msg: HubToAgent = { type: "apply_config", config: inst.config, configHash, services };
+    const desiredProcessState = inst.desiredProcessState ?? "running";
+    const msg: HubToAgent = {
+      type: "apply_config",
+      config: inst.config,
+      configHash,
+      services,
+      desiredProcessState,
+    };
     const targets = only ? [only] : this.ctx.getWebSockets(`agent:${inst.id}`);
     this.pushLog({
       type: "log",

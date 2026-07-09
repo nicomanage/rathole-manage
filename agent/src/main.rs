@@ -350,6 +350,7 @@ async fn handle_hub_message(
             config,
             config_hash,
             services: _,
+            desired_process_state,
         } => {
             tracing::info!(hash = %config_hash, "applying config from hub");
             send_log(
@@ -360,7 +361,7 @@ async fn handle_hub_message(
                 ),
             );
             let mut guard = runner.lock().await;
-            match guard.apply_config(*config).await {
+            match guard.apply_config(*config, desired_process_state).await {
                 Ok(()) => {
                     send_log(to_hub_tx, "[agent] config applied");
                     reply(AgentToHub::ConfigAck {

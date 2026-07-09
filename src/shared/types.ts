@@ -131,6 +131,8 @@ export interface Me {
 export type InstanceStatus = "online" | "offline" | "unknown";
 /** Reported state of the rathole process managed by an agent. */
 export type ProcessState = "running" | "stopped" | "errored" | "unknown";
+/** Persisted operator intent for whether the agent should keep services running. */
+export type DesiredProcessState = "running" | "stopped";
 
 export interface AgentMetrics {
   cpuPercent?: number;
@@ -160,6 +162,7 @@ export interface Instance {
   config: RatholeConfig;
   status: InstanceStatus;
   processState: ProcessState;
+  desiredProcessState?: DesiredProcessState;
   lastSeen?: number;
   metrics?: AgentMetrics;
   /**
@@ -220,7 +223,13 @@ export interface ServiceRef {
 /** Messages the hub sends down to an agent. */
 export type HubToAgent =
   | { type: "registered"; instanceId: string; name: string }
-  | { type: "apply_config"; config: RatholeConfig; configHash: string; services?: ServiceRef[] }
+  | {
+      type: "apply_config";
+      config: RatholeConfig;
+      configHash: string;
+      services?: ServiceRef[];
+      desiredProcessState?: DesiredProcessState;
+    }
   | { type: "command"; command: AgentCommand }
   | { type: "ping" }
   | { type: "error"; message: string };

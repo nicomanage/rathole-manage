@@ -198,6 +198,7 @@ function newInstance(
     config,
     status: "offline",
     processState: "unknown",
+    desiredProcessState: "running",
     createdAt: now,
     updatedAt: now,
   };
