@@ -13,13 +13,62 @@ type LegacyRatholeService = RatholeService & { domain?: string };
 
 export const HTTP_PROXY_BIND_ADDR = "[::]:80";
 export const HTTPS_PROXY_BIND_ADDR = "[::]:443";
+export const HTTP_SERVICE_BIND_ADDR_PREFIX = "memory://";
 
 function isHttpService(svc: RatholeService): boolean {
   return svc.type === "http" || svc.type === "https";
 }
 
 function hasHttpRoute(svc: RatholeService): boolean {
-  return isHttpService(svc);
+  return isHttpService(svc) || serviceHttpHosts(svc).length > 0;
+}
+
+function hasHttpsRoute(svc: RatholeService): boolean {
+  return svc.type === "https" && serviceHttpHosts(svc).length > 0;
+}
+
+function assignHttpServiceBindAddrs(services: RatholeService[]): RatholeService[] {
+  return services.map((service, i) => {
+    if (!isHttpService(service)) return service;
+    const key = service.name.trim() || `service_${i + 1}`;
+    return { ...service, bindAddr: `${HTTP_SERVICE_BIND_ADDR_PREFIX}${key}` };
+  });
+}
+
+function defaultPublicBindAddr(i: number): string {
+  return `0.0.0.0:${5000 + i}`;
+}
+
+function restorePublicBindAddr(service: RatholeService, i: number): string {
+  const bindAddr = service.bindAddr.trim();
+  if (!bindAddr || bindAddr.startsWith(HTTP_SERVICE_BIND_ADDR_PREFIX)) {
+    return defaultPublicBindAddr(i);
+  }
+  return service.bindAddr;
+}
+
+export function parseHttpHostsInput(value: string): string[] {
+  return value
+    .split(/[\s,;]+/)
+    .map((host) => host.trim())
+    .filter(Boolean);
+}
+
+export function serviceHttpHosts(service: RatholeService): string[] {
+  const hosts = [
+    ...(service.httpHosts ?? []),
+    ...(service.httpHost ? parseHttpHostsInput(service.httpHost) : []),
+  ];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const host of hosts) {
+    const trimmed = host.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(trimmed);
+  }
+  return normalized;
 }
 
 /**
@@ -33,20 +82,27 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
   const httpEnabled = !!config.http?.enabled;
-  const services = legacyServices.map(({ domain: _domain, ...service }) => {
-    const httpHost = httpEnabled ? service.httpHost?.trim() || undefined : undefined;
+  const services = legacyServices.map(({ domain: _domain, ...service }, i) => {
+    const httpHosts = httpEnabled ? serviceHttpHosts(service) : [];
     const serviceType =
       !httpEnabled && isHttpService(service)
         ? "tcp"
-        : httpHost && service.type === "tcp"
+        : httpHosts.length > 0 && service.type === "tcp"
           ? "http"
           : service.type;
+    const bindAddr =
+      serviceType === "tcp" && isHttpService(service)
+        ? restorePublicBindAddr(service, i)
+        : service.bindAddr;
     return {
       ...service,
       type: serviceType,
-      httpHost,
+      bindAddr,
+      httpHost: undefined,
+      httpHosts: httpHosts.length > 0 ? httpHosts : undefined,
     };
   });
+  const normalizedServices = assignHttpServiceBindAddrs(services);
 
   return {
     ...config,
@@ -65,7 +121,7 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
             : undefined,
         }
       : undefined,
-    services,
+    services: normalizedServices,
   };
 }
 
@@ -156,10 +212,6 @@ function validateHttpHost(value: string): string | null {
   return null;
 }
 
-function isLikelyEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
 /** Validate a config, returning a list of human-readable problems (empty = ok). */
 export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -175,7 +227,8 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
   const httpRoutes = config.services.filter(hasHttpRoute);
-  if (httpEnabled || httpRoutes.length > 0 || letsEncryptEnabled) {
+  const letsEncryptActive = letsEncryptEnabled && config.services.some(hasHttpsRoute);
+  if (httpEnabled || httpRoutes.length > 0) {
     const httpBindAddr = config.http?.bindAddr?.trim() || HTTP_PROXY_BIND_ADDR;
     if (httpBindAddr !== HTTP_PROXY_BIND_ADDR) {
       issues.push({
@@ -184,36 +237,18 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
       });
     }
   }
-  if (!httpEnabled && (httpRoutes.length > 0 || letsEncryptEnabled)) {
+  if (!httpEnabled && httpRoutes.length > 0) {
     issues.push({
       path: "http.enabled",
-      message: "Enable the HTTP proxy before assigning HTTP hosts or Let's Encrypt.",
+      message: "Enable the HTTP proxy before assigning HTTP hosts.",
     });
   }
-  if (letsEncryptEnabled) {
+  if (letsEncryptActive) {
     const httpsBindAddr = config.http?.httpsBindAddr?.trim() || HTTPS_PROXY_BIND_ADDR;
     if (httpsBindAddr !== HTTPS_PROXY_BIND_ADDR) {
       issues.push({
         path: "http.httpsBindAddr",
         message: `HTTPS proxy always listens on ${HTTPS_PROXY_BIND_ADDR}.`,
-      });
-    }
-    const email = config.http?.letsEncrypt?.email?.trim() ?? "";
-    if (!email) {
-      issues.push({
-        path: "http.letsEncrypt.email",
-        message: "Let's Encrypt account email is required.",
-      });
-    } else if (!isLikelyEmail(email)) {
-      issues.push({
-        path: "http.letsEncrypt.email",
-        message: "Let's Encrypt account email must look like name@example.com.",
-      });
-    }
-    if (httpRoutes.length === 0) {
-      issues.push({
-        path: "http.letsEncrypt.enabled",
-        message: "Assign at least one HTTP host before enabling Let's Encrypt.",
       });
     }
   }
@@ -229,55 +264,53 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
     seen.add(svc.name);
 
-    const publicBindError = validateHostPort(svc.bindAddr, "[::]:5000");
-    if (publicBindError) {
-      issues.push({
-        path: `${base}.bindAddr`,
-        message: `Service "${svc.name || i}" public bind address ${publicBindError}`,
-      });
-    }
-
-    const httpHost = svc.httpHost?.trim();
-    if (isHttpService(svc) && !httpHost) {
-      issues.push({
-        path: `${base}.httpHost`,
-        message: `Service "${svc.name || i}" needs an HTTP host.`,
-      });
-    }
-    if (httpHost) {
-      const httpHostError = validateHttpHost(svc.httpHost ?? "");
-      if (httpHostError) {
+    if (!isHttpService(svc)) {
+      const publicBindError = validateHostPort(svc.bindAddr, "[::]:5000");
+      if (publicBindError) {
         issues.push({
-          path: `${base}.httpHost`,
-          message: `Service "${svc.name || i}" HTTP host ${httpHostError}`,
+          path: `${base}.bindAddr`,
+          message: `Service "${svc.name || i}" public bind address ${publicBindError}`,
         });
       }
+    }
+
+    const httpHosts = serviceHttpHosts(svc);
+    if (isHttpService(svc) && httpHosts.length === 0) {
+      issues.push({
+        path: `${base}.httpHosts`,
+        message: `Service "${svc.name || i}" needs at least one HTTP host.`,
+      });
+    }
+    if (httpHosts.length > 0) {
       if (svc.type === "udp") {
         issues.push({
-          path: `${base}.httpHost`,
+          path: `${base}.httpHosts`,
           message: `Service "${svc.name || i}" cannot be UDP and receive HTTP proxy traffic.`,
         });
       }
       if (svc.type === "tcp") {
         issues.push({
-          path: `${base}.httpHost`,
+          path: `${base}.httpHosts`,
           message: `Service "${svc.name || i}" must be HTTP or HTTPS to use an HTTP host.`,
         });
       }
-      if (svc.type === "https" && !letsEncryptEnabled) {
-        issues.push({
-          path: "http.letsEncrypt.enabled",
-          message: `Enable Let's Encrypt before using HTTPS service "${svc.name || i}".`,
-        });
-      }
-      const key = httpHost.toLowerCase();
-      if (seenHttpHosts.has(key)) {
-        issues.push({
-          path: `${base}.httpHost`,
-          message: `Duplicate HTTP host "${httpHost}".`,
-        });
-      }
-      seenHttpHosts.add(key);
+      httpHosts.forEach((httpHost, hostIndex) => {
+        const httpHostError = validateHttpHost(httpHost);
+        if (httpHostError) {
+          issues.push({
+            path: `${base}.httpHosts`,
+            message: `Service "${svc.name || i}" HTTP host ${hostIndex + 1} ${httpHostError}`,
+          });
+        }
+        const key = httpHost.toLowerCase();
+        if (seenHttpHosts.has(key)) {
+          issues.push({
+            path: `${base}.httpHosts`,
+            message: `Duplicate HTTP host "${httpHost}".`,
+          });
+        }
+        seenHttpHosts.add(key);
+      });
     }
   });
 

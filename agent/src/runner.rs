@@ -139,7 +139,7 @@ impl Runner {
             .iter()
             .map(|svc| ServiceRef {
                 name: svc.name.clone(),
-                bind_addr: svc.bind_addr.clone(),
+                bind_addr: service_bind_addr(svc),
             })
             .collect::<Vec<_>>();
         let http_config =
@@ -239,13 +239,44 @@ fn service_type(kind: WireServiceType) -> ServiceType {
 }
 
 fn service_config(service: RatholeService) -> ServerServiceConfig {
+    let bind_addr = service_bind_addr(&service);
     ServerServiceConfig {
         service_type: service_type(service.service_type),
         name: service.name,
-        bind_addr: service.bind_addr,
+        bind_addr,
         token: mask(service.token),
         nodelay: service.nodelay,
     }
+}
+
+fn virtual_bind_addr(service_name: &str) -> String {
+    format!("memory://{service_name}")
+}
+
+fn service_bind_addr(service: &RatholeService) -> String {
+    match service.service_type {
+        WireServiceType::Http | WireServiceType::Https => virtual_bind_addr(&service.name),
+        WireServiceType::Tcp | WireServiceType::Udp => service.bind_addr.clone(),
+    }
+}
+
+fn service_http_hosts(service: &RatholeService) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Some(list) = &service.http_hosts {
+        hosts.extend(list.iter().map(String::as_str));
+    }
+    if let Some(host) = service.http_host.as_deref() {
+        hosts.push(host);
+    }
+
+    let mut normalized = hosts
+        .into_iter()
+        .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConfig>> {
@@ -259,17 +290,24 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
     let routes = config
         .services
         .iter()
-        .filter_map(|svc| {
-            let host = svc.http_host.as_ref()?.trim();
-            if host.is_empty() {
-                return None;
-            }
-            Some(HttpRoute {
-                host: host.to_ascii_lowercase(),
-                upstream_addr: visitor_addr_for_bind(&svc.bind_addr),
-                service: svc.name.clone(),
-            })
+        .flat_map(|svc| {
+            let upstream_addr = service_bind_addr(svc);
+            let service = svc.name.clone();
+            service_http_hosts(svc)
+                .into_iter()
+                .map(move |host| HttpRoute {
+                    host,
+                    upstream_addr: upstream_addr.clone(),
+                    service: service.clone(),
+                })
+                .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    let https_hosts = config
+        .services
+        .iter()
+        .filter(|svc| matches!(&svc.service_type, WireServiceType::Https))
+        .flat_map(service_http_hosts)
         .collect::<Vec<_>>();
 
     if routes.is_empty() {
@@ -280,6 +318,7 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         .lets_encrypt
         .as_ref()
         .filter(|config| config.enabled)
+        .filter(|_| !https_hosts.is_empty())
         .map(|config| {
             let email = config.email.trim();
             if email.is_empty() {
@@ -296,36 +335,9 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         bind_addr: HTTP_PROXY_BIND_ADDR.into(),
         https_bind_addr: lets_encrypt.as_ref().map(|_| HTTPS_PROXY_BIND_ADDR.into()),
         lets_encrypt,
+        https_hosts,
         routes,
     }))
-}
-
-fn visitor_addr_for_bind(bind_addr: &str) -> String {
-    let trimmed = bind_addr.trim();
-    if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some((host, port_part)) = rest.split_once("]:") {
-            let port = port_part.trim();
-            let host = match host {
-                "::" | "0:0:0:0:0:0:0:0" => "::1",
-                other => other,
-            };
-            return format!("[{host}]:{port}");
-        }
-    }
-
-    let Some((host, port)) = trimmed.rsplit_once(':') else {
-        return trimmed.to_string();
-    };
-    let host = match host {
-        "" | "0.0.0.0" => "127.0.0.1",
-        "::" => "::1",
-        other => other,
-    };
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
 }
 
 fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
@@ -366,4 +378,189 @@ fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
         transport,
         heartbeat_interval: config.heartbeat_interval.unwrap_or(30),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{
+        HttpProxyConfig as WireHttpProxyConfig, LetsEncryptConfig as WireLetsEncryptConfig,
+        ServiceType as WireServiceType,
+    };
+
+    fn config(services: Vec<RatholeService>, email: &str) -> RatholeConfig {
+        RatholeConfig {
+            bind_addr: "0.0.0.0:2333".into(),
+            domain: None,
+            default_token: Some("secret".into()),
+            transport: WireTransportType::Tcp,
+            tls: None,
+            noise: None,
+            websocket: None,
+            http: Some(WireHttpProxyConfig {
+                enabled: true,
+                bind_addr: HTTP_PROXY_BIND_ADDR.into(),
+                https_bind_addr: Some(HTTPS_PROXY_BIND_ADDR.into()),
+                lets_encrypt: Some(WireLetsEncryptConfig {
+                    enabled: true,
+                    email: email.into(),
+                    staging: Some(false),
+                }),
+            }),
+            heartbeat_interval: None,
+            services,
+        }
+    }
+
+    fn service(name: &str, service_type: WireServiceType, host: &str) -> RatholeService {
+        RatholeService {
+            name: name.into(),
+            service_type,
+            bind_addr: "0.0.0.0:8080".into(),
+            http_host: Some(host.into()),
+            http_hosts: None,
+            token: None,
+            nodelay: None,
+        }
+    }
+
+    fn service_with_hosts(
+        name: &str,
+        service_type: WireServiceType,
+        hosts: &[&str],
+    ) -> RatholeService {
+        RatholeService {
+            name: name.into(),
+            service_type,
+            bind_addr: "0.0.0.0:8080".into(),
+            http_host: None,
+            http_hosts: Some(hosts.iter().map(|host| host.to_string()).collect()),
+            token: None,
+            nodelay: None,
+        }
+    }
+
+    #[test]
+    fn ignores_lets_encrypt_without_https_routes() {
+        let proxy = http_proxy_config(&config(
+            vec![service("web", WireServiceType::Http, "app.example.com")],
+            "",
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert!(proxy.lets_encrypt.is_none());
+        assert!(proxy.https_bind_addr.is_none());
+        assert!(proxy.https_hosts.is_empty());
+        assert_eq!(proxy.routes.len(), 1);
+        assert_eq!(proxy.routes[0].upstream_addr, "memory://web");
+    }
+
+    #[test]
+    fn lets_encrypt_uses_only_https_route_hosts() {
+        let proxy = http_proxy_config(&config(
+            vec![
+                service("web", WireServiceType::Http, "app.example.com"),
+                service("secure", WireServiceType::Https, "secure.example.com"),
+            ],
+            "admin@example.com",
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert!(proxy.lets_encrypt.is_some());
+        assert_eq!(
+            proxy.https_bind_addr.as_deref(),
+            Some(HTTPS_PROXY_BIND_ADDR)
+        );
+        assert_eq!(proxy.https_hosts, vec!["secure.example.com".to_string()]);
+        assert_eq!(proxy.routes.len(), 2);
+        assert_eq!(
+            proxy
+                .routes
+                .iter()
+                .map(|route| route.upstream_addr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["memory://web", "memory://secure"]
+        );
+    }
+
+    #[test]
+    fn expands_multiple_hosts_for_one_service() {
+        let proxy = http_proxy_config(&config(
+            vec![service_with_hosts(
+                "secure",
+                WireServiceType::Https,
+                &["secure.example.com", "www.example.com"],
+            )],
+            "admin@example.com",
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            proxy
+                .routes
+                .iter()
+                .map(|route| (route.host.as_str(), route.upstream_addr.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("secure.example.com", "memory://secure"),
+                ("www.example.com", "memory://secure"),
+            ]
+        );
+        assert_eq!(
+            proxy.https_hosts,
+            vec![
+                "secure.example.com".to_string(),
+                "www.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn requires_lets_encrypt_email_only_for_https_routes() {
+        let error = http_proxy_config(&config(
+            vec![service(
+                "secure",
+                WireServiceType::Https,
+                "secure.example.com",
+            )],
+            "",
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("account email"));
+    }
+
+    #[test]
+    fn server_config_uses_virtual_binds_for_http_services() {
+        let mut tcp = service("ssh", WireServiceType::Tcp, "");
+        tcp.bind_addr = "0.0.0.0:5202".into();
+        tcp.http_host = None;
+        tcp.http_hosts = None;
+
+        let server = to_server_config(config(
+            vec![
+                tcp,
+                service("web", WireServiceType::Http, "app.example.com"),
+                service("secure", WireServiceType::Https, "secure.example.com"),
+            ],
+            "admin@example.com",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            server.services.get("ssh").unwrap().bind_addr.as_str(),
+            "0.0.0.0:5202"
+        );
+        assert_eq!(
+            server.services.get("web").unwrap().bind_addr.as_str(),
+            "memory://web"
+        );
+        assert_eq!(
+            server.services.get("secure").unwrap().bind_addr.as_str(),
+            "memory://secure"
+        );
+    }
 }

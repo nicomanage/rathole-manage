@@ -12,6 +12,7 @@ pub struct HttpProxyConfig {
     pub bind_addr: String,
     pub https_bind_addr: Option<String>,
     pub lets_encrypt: Option<LetsEncryptConfig>,
+    pub https_hosts: Vec<String>,
     pub routes: Vec<HttpRoute>,
 }
 
@@ -24,10 +25,16 @@ mod imp {
     use bytes::Bytes;
     use pingora::http::ResponseHeader;
     use pingora::prelude::{
-        http_proxy_service, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult,
-        Server, Session,
+        ConnectError, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult, Server,
+        Session,
     };
+    use pingora::protocols::l4::stream::Stream as PingoraStream;
+    use pingora::protocols::l4::virt::{VirtualSockOpt, VirtualSocket, VirtualSocketStream};
+    use pingora::protocols::tls::{CustomALPN, ALPN};
+    use pingora::protocols::Stream as PingoraIoStream;
+    use pingora::proxy::{http_proxy_service_with_name_custom, ProcessCustomSession};
     use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
+    use pingora::upstreams::peer::Peer;
     use std::collections::HashMap;
     use std::future::Future;
     use std::net::TcpListener;
@@ -36,8 +43,10 @@ mod imp {
     use std::pin::Pin;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
     use std::sync::{Arc, RwLock};
+    use std::task::{Context as TaskContext, Poll};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
     use tokio::sync::Notify;
 
     #[derive(Clone)]
@@ -67,6 +76,94 @@ mod imp {
 
     struct HostRouter {
         shared: Arc<SharedState>,
+    }
+
+    #[derive(Debug)]
+    struct RatholeVirtualSocket(DuplexStream);
+
+    impl AsyncRead for RatholeVirtualSocket {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for RatholeVirtualSocket {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    impl VirtualSocket for RatholeVirtualSocket {
+        fn set_socket_option(&self, _opt: VirtualSockOpt) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct RatholeConnector;
+
+    #[async_trait]
+    impl pingora::connectors::http::custom::Connector for RatholeConnector {
+        type Session = ();
+
+        async fn get_http_session<P: Peer + Send + Sync + 'static>(
+            &self,
+            peer: &P,
+        ) -> PingoraResult<(
+            pingora::connectors::http::custom::Connection<Self::Session>,
+            bool,
+        )> {
+            let key = peer.sni();
+            let duplex = rathole::open_virtual_tcp(key).await.map_err(|error| {
+                Error::because(ConnectError, "opening rathole virtual upstream", error)
+            })?;
+            let stream = PingoraStream::from(VirtualSocketStream::new(Box::new(
+                RatholeVirtualSocket(duplex),
+            )));
+            Ok((
+                pingora::connectors::http::custom::Connection::Stream(
+                    Box::new(stream) as PingoraIoStream
+                ),
+                false,
+            ))
+        }
+
+        async fn reused_http_session<P: Peer + Send + Sync + 'static>(
+            &self,
+            _peer: &P,
+        ) -> Option<Self::Session> {
+            None
+        }
+
+        async fn release_http_session<P: Peer + Send + Sync + 'static>(
+            &self,
+            _session: Self::Session,
+            _peer: &P,
+            _idle_timeout: Option<Duration>,
+        ) {
+        }
     }
 
     #[async_trait]
@@ -124,11 +221,9 @@ mod imp {
                 .route
                 .as_ref()
                 .expect("Pingora HTTP route should be set by request_filter");
-            Ok(Box::new(HttpPeer::new(
-                route.upstream_addr.as_str(),
-                false,
-                String::new(),
-            )))
+            let mut peer = HttpPeer::new(("127.0.0.1", 0), false, route.upstream_addr.clone());
+            peer.options.alpn = ALPN::Custom(CustomALPN::new(b"rathole-memory".to_vec()));
+            Ok(Box::new(peer))
         }
 
         async fn upstream_request_filter(
@@ -238,7 +333,11 @@ mod imp {
 
             if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
                 self.ensure_http_listener(&config.bind_addr).await?;
-                let domains = route_domains(&config.routes);
+                let domains = route_domains(&config.https_hosts);
+                if domains.is_empty() {
+                    self.ensure_running(runtime).await?;
+                    return Ok(());
+                }
                 let issuer = AcmeIssuer::new(self.shared.challenges.clone());
                 let certificate = issuer
                     .ensure_certificate(lets_encrypt, &domains)
@@ -401,7 +500,15 @@ mod imp {
         let mut server = Server::new(None).map_err(|e| format!("{e:#}"))?;
         server.bootstrap();
         let router = HostRouter { shared };
-        let mut service = http_proxy_service(&server.configuration, router);
+        let on_custom: ProcessCustomSession<HostRouter, RatholeConnector> =
+            Arc::new(|_, stream, _| Box::pin(async move { Some(stream) }));
+        let mut service = http_proxy_service_with_name_custom(
+            &server.configuration,
+            router,
+            "rathole-agent-pingora",
+            RatholeConnector,
+            on_custom,
+        );
         service.add_tcp(&config.bind_addr);
         if let (Some(https_bind_addr), Some(certificate)) =
             (config.https_bind_addr.as_ref(), config.certificate.as_ref())
@@ -448,10 +555,10 @@ mod imp {
         (!normalized.is_empty()).then_some(normalized)
     }
 
-    fn route_domains(routes: &[HttpRoute]) -> Vec<String> {
-        let mut domains = routes
+    fn route_domains(hosts: &[String]) -> Vec<String> {
+        let mut domains = hosts
             .iter()
-            .map(|route| normalize_route_host(&route.host))
+            .map(|host| normalize_route_host(host))
             .filter(|host| !host.is_empty())
             .collect::<Vec<_>>();
         domains.sort();

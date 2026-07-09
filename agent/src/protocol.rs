@@ -35,6 +35,7 @@ pub struct RatholeService {
     pub service_type: ServiceType,
     pub bind_addr: String,
     pub http_host: Option<String>,
+    pub http_hosts: Option<Vec<String>>,
     pub token: Option<String>,
     pub nodelay: Option<bool>,
 }

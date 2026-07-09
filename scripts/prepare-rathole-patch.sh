@@ -27,6 +27,6 @@ mkdir -p "$FETCH/src"
 (cd "$FETCH" && cargo vendor --versioned-dirs "$TMP/vendor" >/dev/null)
 mv "$TMP/vendor/rathole-$VERSION" "$DEST"
 
-git -C "$ROOT" apply --directory=vendor/rathole "$ROOT/patches/rathole-direct-api.patch"
+git -C "$ROOT" apply --ignore-whitespace --directory=vendor/rathole "$ROOT/patches/rathole-direct-api.patch"
 grep -q "run_server_direct" "$DEST/src/lib.rs"
 rm -rf "$TMP"

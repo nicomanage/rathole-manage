@@ -9,14 +9,16 @@ export interface RatholeService {
   /** Service name, unique within an instance. Becomes the TOML table key. */
   name: string;
   type: ServiceType;
-  /** Public address rathole listens on for this service, e.g. "0.0.0.0:5202". */
+  /** Public bind for TCP/UDP services; HTTP/HTTPS services use an internal memory:// key. */
   bindAddr: string;
   /**
-   * Optional HTTP virtual host handled by the agent's embedded Pingora proxy.
+   * Optional HTTP virtual hosts handled by the agent's embedded Pingora proxy.
    * Required for services whose panel type is `http` or `https`.
-   * Requests for this Host are reverse-proxied to this service's public bind
-   * address.
+   * Requests for these Hosts are reverse-proxied into the service's in-memory
+   * rathole visitor stream.
    */
+  httpHosts?: string[];
+  /** Legacy single-host field, migrated to `httpHosts` during normalization. */
   httpHost?: string;
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;

@@ -5,6 +5,7 @@ import {
   generateClientServiceToml,
   generateClientToml,
   HTTP_PROXY_BIND_ADDR,
+  HTTP_SERVICE_BIND_ADDR_PREFIX,
   HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
   validateConfig,
@@ -136,20 +137,32 @@ describe("validateConfig", () => {
         services: [{ name: "web", type: "http", bindAddr: "0.0.0.0:8080" }],
       }),
     );
-    expect(issues.some((i) => i.path === "services[0].httpHost")).toBe(true);
+    expect(issues.some((i) => i.path === "services[0].httpHosts")).toBe(true);
   });
 
-  it("requires Let's Encrypt for HTTPS services", () => {
-    const issues = validateConfig(
-      config({
-        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
-        services: [{ name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
-      }),
-    );
-    expect(issues.some((i) => i.path === "http.letsEncrypt.enabled")).toBe(true);
+  it("allows HTTPS services without Let's Encrypt form validation", () => {
+    expect(
+      validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [{ name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
+        }),
+      ),
+    ).toEqual([]);
   });
 
-  it("accepts Let's Encrypt when HTTP-01 can bind port 80", () => {
+  it("does not require public bind validation for HTTP services", () => {
+    expect(
+      validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [{ name: "web", type: "http", bindAddr: "", httpHost: "app.example.com" }],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("accepts Let's Encrypt when HTTPS service can use HTTP-01", () => {
     expect(
       validateConfig(
         config({
@@ -160,7 +173,7 @@ describe("validateConfig", () => {
             letsEncrypt: { enabled: true, email: "admin@example.com" },
           },
           services: [
-            { name: "web", type: "http", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+            { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
           ],
         }),
       ),
@@ -194,28 +207,29 @@ describe("validateConfig", () => {
           letsEncrypt: { enabled: true, email: "admin@example.com" },
         },
         services: [
-          { name: "web", type: "http", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
         ],
       }),
     );
     expect(issues.some((i) => i.path === "http.httpsBindAddr" && /always listens/.test(i.message))).toBe(true);
   });
 
-  it("requires a Let's Encrypt account email", () => {
-    const issues = validateConfig(
-      config({
+  it("does not validate Let's Encrypt account email in the form", () => {
+    expect(
+      validateConfig(
+        config({
           http: {
             enabled: true,
             bindAddr: HTTP_PROXY_BIND_ADDR,
             httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
             letsEncrypt: { enabled: true, email: "" },
           },
-        services: [
-          { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
-        ],
-      }),
-    );
-    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+          services: [
+            { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          ],
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("normalizes proxy binds to fixed IPv6 wildcard ports", () => {
@@ -241,6 +255,61 @@ describe("validateConfig", () => {
       }),
     );
     expect(normalized.services[0].type).toBe("http");
+    expect(normalized.services[0].bindAddr).toBe(`${HTTP_SERVICE_BIND_ADDR_PREFIX}web`);
+    expect(normalized.services[0].httpHost).toBeUndefined();
+    expect(normalized.services[0].httpHosts).toEqual(["app.example.com"]);
+  });
+
+  it("accepts multiple HTTP hosts on one service", () => {
+    expect(
+      validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [
+            {
+              name: "web",
+              type: "http",
+              bindAddr: "0.0.0.0:8080",
+              httpHosts: ["app.example.com", "www.example.com"],
+            },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("normalizes comma separated legacy HTTP hosts", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          {
+            name: "web",
+            type: "http",
+            bindAddr: "0.0.0.0:8080",
+            httpHost: "app.example.com, www.example.com app.example.com",
+          },
+        ],
+      }),
+    );
+    expect(normalized.services[0].httpHost).toBeUndefined();
+    expect(normalized.services[0].httpHosts).toEqual(["app.example.com", "www.example.com"]);
+  });
+
+  it("normalizes HTTP and HTTPS service binds to virtual memory keys", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          { name: "web", type: "http", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          { name: "secure", type: "https", bindAddr: "0.0.0.0:8443", httpHost: "secure.example.com" },
+        ],
+      }),
+    );
+    expect(normalized.services.map((service) => service.bindAddr)).toEqual([
+      `${HTTP_SERVICE_BIND_ADDR_PREFIX}web`,
+      `${HTTP_SERVICE_BIND_ADDR_PREFIX}secure`,
+    ]);
   });
 
   it("removes HTTP service types when the HTTP service is disabled", () => {
@@ -255,6 +324,33 @@ describe("validateConfig", () => {
     );
     expect(normalized.services.map((service) => service.type)).toEqual(["tcp", "tcp"]);
     expect(normalized.services.every((service) => service.httpHost === undefined)).toBe(true);
+    expect(normalized.services.every((service) => service.httpHosts === undefined)).toBe(true);
+  });
+
+  it("restores public binds when disabled HTTP services had virtual binds", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: { enabled: false, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          {
+            name: "web",
+            type: "http",
+            bindAddr: `${HTTP_SERVICE_BIND_ADDR_PREFIX}web`,
+            httpHost: "app.example.com",
+          },
+          {
+            name: "secure",
+            type: "https",
+            bindAddr: `${HTTP_SERVICE_BIND_ADDR_PREFIX}secure`,
+            httpHost: "secure.example.com",
+          },
+        ],
+      }),
+    );
+    expect(normalized.services.map((service) => service.bindAddr)).toEqual([
+      "0.0.0.0:5000",
+      "0.0.0.0:5001",
+    ]);
   });
 });
 

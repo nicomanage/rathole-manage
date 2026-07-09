@@ -6,8 +6,11 @@ import {
   generateClientGlobalToml,
   generateClientServiceToml,
   HTTP_PROXY_BIND_ADDR,
+  HTTP_SERVICE_BIND_ADDR_PREFIX,
   HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
+  parseHttpHostsInput,
+  serviceHttpHosts,
   validateConfig,
 } from "@shared/config-generator";
 import type {
@@ -74,6 +77,18 @@ const HTTP_SERVICE_TYPES: ServiceType[] = ["tcp", "udp", "http", "https"];
 
 function isHttpServiceType(type: ServiceType): boolean {
   return type === "http" || type === "https";
+}
+
+function defaultPublicBindAddr(i: number): string {
+  return `0.0.0.0:${5000 + i}`;
+}
+
+function restorePublicBindAddr(service: RatholeService, i: number): string {
+  const bindAddr = service.bindAddr.trim();
+  if (!bindAddr || bindAddr.startsWith(HTTP_SERVICE_BIND_ADDR_PREFIX)) {
+    return defaultPublicBindAddr(i);
+  }
+  return service.bindAddr;
 }
 
 export function InstanceDetail() {
@@ -391,10 +406,22 @@ function ConfigEditor({
   }
 
   function updateServiceType(i: number, type: ServiceType) {
-    const nextType = config.http?.enabled ? type : "tcp";
-    updateService(i, {
-      type: nextType,
-      ...(isHttpServiceType(nextType) ? {} : { httpHost: undefined }),
+    setConfig((c) => {
+      const nextType = c.http?.enabled ? type : "tcp";
+      const services = c.services.slice();
+      const previous = services[i];
+      services[i] = {
+        ...previous,
+        type: nextType,
+        ...(isHttpServiceType(nextType)
+          ? {}
+          : {
+              httpHost: undefined,
+              httpHosts: undefined,
+              bindAddr: isHttpServiceType(previous.type) ? restorePublicBindAddr(previous, i) : previous.bindAddr,
+            }),
+      };
+      return normalizeConfig({ ...c, services });
     });
   }
 
@@ -404,9 +431,15 @@ function ConfigEditor({
       const enabled = rest.enabled ?? c.http?.enabled ?? false;
       const services = enabled
         ? c.services
-        : c.services.map((service) =>
+        : c.services.map((service, idx) =>
             isHttpServiceType(service.type)
-              ? { ...service, type: "tcp" as const, httpHost: undefined }
+              ? {
+                  ...service,
+                  type: "tcp" as const,
+                  bindAddr: restorePublicBindAddr(service, idx),
+                  httpHost: undefined,
+                  httpHosts: undefined,
+                }
               : service,
           );
       return {
@@ -481,6 +514,7 @@ function ConfigEditor({
   }
 
   const serviceTypes = config.http?.enabled ? HTTP_SERVICE_TYPES : BASIC_SERVICE_TYPES;
+  const showPublicBindColumn = config.services.some((svc) => !isHttpServiceType(svc.type));
 
   const validationPanel =
     issues.length > 0 ? (
@@ -609,11 +643,6 @@ function ConfigEditor({
                 <LockKeyhole className="h-4 w-4 text-muted-foreground" />
                 Let's Encrypt
               </Label>
-              {issueByPath.has("http.letsEncrypt.enabled") && (
-                <p className="mt-1 text-xs text-destructive">
-                  {issueByPath.get("http.letsEncrypt.enabled")}
-                </p>
-              )}
             </div>
             <Switch
               checked={!!config.http?.letsEncrypt?.enabled}
@@ -624,28 +653,11 @@ function ConfigEditor({
           <div className="space-y-2">
             <Label>ACME email</Label>
             <Input
-              aria-invalid={issueByPath.has("http.letsEncrypt.email")}
-              className={cn(
-                "font-mono",
-                issueByPath.has("http.letsEncrypt.email") && "border-destructive",
-              )}
+              className="font-mono"
               placeholder="admin@example.com"
               value={config.http?.letsEncrypt?.email ?? ""}
               disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
               onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
-            />
-            {issueByPath.has("http.letsEncrypt.email") && (
-              <p className="text-xs text-destructive">
-                {issueByPath.get("http.letsEncrypt.email")}
-              </p>
-            )}
-          </div>
-          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-            <Label>Staging</Label>
-            <Switch
-              checked={!!config.http?.letsEncrypt?.staging}
-              disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
-              onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
             />
           </div>
         </CardContent>
@@ -679,8 +691,10 @@ function ConfigEditor({
                   <TableHead className="w-16 text-center">Online</TableHead>
                   <TableHead className="min-w-32">Name</TableHead>
                   <TableHead className="w-24">Type</TableHead>
-                  <TableHead className="min-w-40">HTTP host</TableHead>
-                  <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  <TableHead className="min-w-40">HTTP hosts</TableHead>
+                  {showPublicBindColumn && (
+                    <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  )}
                   <TableHead className="min-w-36">Token</TableHead>
                   <TableHead className="w-20 text-center">nodelay</TableHead>
                   <TableHead className="w-28 text-right">Traffic</TableHead>
@@ -690,7 +704,9 @@ function ConfigEditor({
               <TableBody>
                 {config.services.map((svc, i) => {
                   const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
-                  const httpHostIssue = issueByPath.get(`services[${i}].httpHost`);
+                  const httpHostIssue =
+                    issueByPath.get(`services[${i}].httpHosts`) ??
+                    issueByPath.get(`services[${i}].httpHost`);
                   return (
                     <TableRow key={i} className="align-top">
                       <TableCell className="text-center">
@@ -726,27 +742,38 @@ function ConfigEditor({
                         <Input
                           aria-invalid={!!httpHostIssue}
                           className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
-                          placeholder="app.example.com"
-                          value={svc.httpHost ?? ""}
+                          placeholder="app.example.com, www.example.com"
+                          value={serviceHttpHosts(svc).join(", ")}
                           disabled={!canEdit || (svc.type !== "http" && svc.type !== "https")}
-                          onChange={(e) => updateService(i, { httpHost: e.target.value })}
+                          onChange={(e) =>
+                            updateService(i, {
+                              httpHost: undefined,
+                              httpHosts: parseHttpHostsInput(e.target.value),
+                            })
+                          }
                         />
                         {httpHostIssue && (
                           <p className="mt-1 text-xs text-destructive">{httpHostIssue}</p>
                         )}
                       </TableCell>
-                      <TableCell>
-                        <Input
-                          aria-invalid={!!publicBindIssue}
-                          className={cn("h-8 font-mono", publicBindIssue && "border-destructive")}
-                          value={svc.bindAddr}
-                          disabled={!canEdit}
-                          onChange={(e) => updateService(i, { bindAddr: e.target.value })}
-                        />
-                        {publicBindIssue && (
-                          <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
-                        )}
-                      </TableCell>
+                      {showPublicBindColumn && (
+                        <TableCell>
+                          {!isHttpServiceType(svc.type) && (
+                            <>
+                              <Input
+                                aria-invalid={!!publicBindIssue}
+                                className={cn("h-8 font-mono", publicBindIssue && "border-destructive")}
+                                value={svc.bindAddr}
+                                disabled={!canEdit}
+                                onChange={(e) => updateService(i, { bindAddr: e.target.value })}
+                              />
+                              {publicBindIssue && (
+                                <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
+                              )}
+                            </>
+                          )}
+                        </TableCell>
+                      )}
                       <TableCell>
                         <Input
                           className="h-8 font-mono"
