@@ -39,9 +39,19 @@ pub struct RatholeService {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LetsEncryptConfig {
+    pub enabled: bool,
+    pub email: String,
+    pub staging: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HttpProxyConfig {
     pub enabled: bool,
     pub bind_addr: String,
+    pub https_bind_addr: Option<String>,
+    pub lets_encrypt: Option<LetsEncryptConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

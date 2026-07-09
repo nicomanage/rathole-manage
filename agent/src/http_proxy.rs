@@ -1,3 +1,5 @@
+use crate::acme::LetsEncryptConfig;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRoute {
     pub host: String,
@@ -8,14 +10,19 @@ pub struct HttpRoute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpProxyConfig {
     pub bind_addr: String,
+    pub https_bind_addr: Option<String>,
+    pub lets_encrypt: Option<LetsEncryptConfig>,
     pub routes: Vec<HttpRoute>,
 }
 
 #[cfg(unix)]
 mod imp {
     use super::{HttpProxyConfig, HttpRoute};
+    use crate::acme::{AcmeIssuer, CertificatePaths, ChallengeStore};
     use anyhow::{bail, Context, Result as AnyResult};
     use async_trait::async_trait;
+    use bytes::Bytes;
+    use pingora::http::ResponseHeader;
     use pingora::prelude::{
         http_proxy_service, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult,
         Server, Session,
@@ -24,6 +31,7 @@ mod imp {
     use std::collections::HashMap;
     use std::future::Future;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::pin::Pin;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -38,9 +46,18 @@ mod imp {
         service: String,
     }
 
-    #[derive(Default)]
-    struct SharedRoutes {
+    struct SharedState {
         routes: RwLock<HashMap<String, RouteState>>,
+        challenges: Arc<ChallengeStore>,
+    }
+
+    impl Default for SharedState {
+        fn default() -> Self {
+            Self {
+                routes: RwLock::new(HashMap::new()),
+                challenges: Arc::new(ChallengeStore::default()),
+            }
+        }
     }
 
     struct RequestCtx {
@@ -49,7 +66,7 @@ mod imp {
     }
 
     struct HostRouter {
-        shared: Arc<SharedRoutes>,
+        shared: Arc<SharedState>,
     }
 
     #[async_trait]
@@ -68,6 +85,15 @@ mod imp {
             session: &mut Session,
             ctx: &mut Self::CTX,
         ) -> PingoraResult<bool> {
+            if let Some(token) = acme_challenge_token(session) {
+                if let Some(value) = self.shared.challenges.get(token) {
+                    respond_text(session, 200, value).await?;
+                    return Ok(true);
+                }
+                session.respond_error(404).await?;
+                return Ok(true);
+            }
+
             let Some(host) = request_host(session) else {
                 session.respond_error(400).await?;
                 return Ok(true);
@@ -157,15 +183,32 @@ mod imp {
         }
     }
 
-    struct Running {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RuntimeConfig {
         bind_addr: String,
+        https_bind_addr: Option<String>,
+        certificate: Option<CertificatePaths>,
+    }
+
+    impl RuntimeConfig {
+        fn http_only(bind_addr: impl Into<String>) -> Self {
+            Self {
+                bind_addr: bind_addr.into(),
+                https_bind_addr: None,
+                certificate: None,
+            }
+        }
+    }
+
+    struct Running {
+        config: RuntimeConfig,
         shutdown: Arc<Notify>,
         done_rx: Receiver<std::result::Result<(), String>>,
         thread: Option<JoinHandle<()>>,
     }
 
     pub struct HttpProxyRunner {
-        shared: Arc<SharedRoutes>,
+        shared: Arc<SharedState>,
         running: Option<Running>,
     }
 
@@ -178,7 +221,7 @@ mod imp {
     impl HttpProxyRunner {
         pub fn new() -> Self {
             Self {
-                shared: Arc::new(SharedRoutes::default()),
+                shared: Arc::new(SharedState::default()),
                 running: None,
             }
         }
@@ -191,16 +234,21 @@ mod imp {
             };
 
             self.set_routes(&config.routes);
-            if self
-                .running
-                .as_ref()
-                .is_some_and(|running| running.bind_addr == config.bind_addr)
-            {
-                return Ok(());
+            let mut runtime = RuntimeConfig::http_only(config.bind_addr.clone());
+
+            if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
+                self.ensure_http_listener(&config.bind_addr).await?;
+                let domains = route_domains(&config.routes);
+                let issuer = AcmeIssuer::new(self.shared.challenges.clone());
+                let certificate = issuer
+                    .ensure_certificate(lets_encrypt, &domains)
+                    .await
+                    .context("ensuring Let's Encrypt certificate")?;
+                runtime.https_bind_addr = config.https_bind_addr.clone();
+                runtime.certificate = Some(certificate);
             }
 
-            self.stop().await?;
-            self.start(&config.bind_addr)?;
+            self.ensure_running(runtime).await?;
             Ok(())
         }
 
@@ -252,28 +300,57 @@ mod imp {
             }
         }
 
-        fn start(&mut self, bind_addr: &str) -> AnyResult<()> {
-            validate_bind_available(bind_addr)?;
+        async fn ensure_http_listener(&mut self, bind_addr: &str) -> AnyResult<()> {
+            if self
+                .running
+                .as_ref()
+                .is_some_and(|running| running.config.bind_addr == bind_addr)
+            {
+                return Ok(());
+            }
+            self.ensure_running(RuntimeConfig::http_only(bind_addr)).await
+        }
+
+        async fn ensure_running(&mut self, config: RuntimeConfig) -> AnyResult<()> {
+            if self
+                .running
+                .as_ref()
+                .is_some_and(|running| running.config == config)
+            {
+                return Ok(());
+            }
+
+            self.stop().await?;
+            self.start(config)?;
+            Ok(())
+        }
+
+        fn start(&mut self, config: RuntimeConfig) -> AnyResult<()> {
+            validate_runtime_bind_available(&config)?;
 
             let shutdown = Arc::new(Notify::new());
             let thread_shutdown = shutdown.clone();
             let thread_shared = self.shared.clone();
-            let thread_bind = bind_addr.to_string();
+            let thread_config = config.clone();
             let (done_tx, done_rx) = mpsc::channel();
             let thread = thread::Builder::new()
                 .name("rathole-agent-pingora".into())
                 .spawn(move || {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        run_pingora(thread_bind, thread_shared, thread_shutdown)
+                        run_pingora(thread_config, thread_shared, thread_shutdown)
                     }))
                     .unwrap_or_else(|_| Err("Pingora HTTP proxy panicked".into()));
                     let _ = done_tx.send(result);
                 })
                 .context("spawning Pingora HTTP proxy thread")?;
 
-            tracing::info!(bind_addr = %bind_addr, "started Pingora HTTP proxy");
+            tracing::info!(
+                bind_addr = %config.bind_addr,
+                https_bind_addr = ?config.https_bind_addr,
+                "started Pingora HTTP proxy"
+            );
             self.running = Some(Running {
-                bind_addr: bind_addr.to_string(),
+                config,
                 shutdown,
                 done_rx,
                 thread: Some(thread),
@@ -282,9 +359,20 @@ mod imp {
         }
     }
 
-    fn validate_bind_available(bind_addr: &str) -> AnyResult<()> {
+    fn validate_runtime_bind_available(config: &RuntimeConfig) -> AnyResult<()> {
+        validate_bind_available(&config.bind_addr, "HTTP")?;
+        if let Some(https_bind_addr) = &config.https_bind_addr {
+            if https_bind_addr == &config.bind_addr {
+                bail!("Pingora HTTPS bind address must be different from HTTP bind address");
+            }
+            validate_bind_available(https_bind_addr, "HTTPS")?;
+        }
+        Ok(())
+    }
+
+    fn validate_bind_available(bind_addr: &str, label: &str) -> AnyResult<()> {
         let listener = TcpListener::bind(bind_addr)
-            .with_context(|| format!("binding Pingora HTTP proxy on {bind_addr}"))?;
+            .with_context(|| format!("binding Pingora {label} proxy on {bind_addr}"))?;
         drop(listener);
         Ok(())
     }
@@ -305,15 +393,24 @@ mod imp {
     }
 
     fn run_pingora(
-        bind_addr: String,
-        shared: Arc<SharedRoutes>,
+        config: RuntimeConfig,
+        shared: Arc<SharedState>,
         shutdown: Arc<Notify>,
     ) -> std::result::Result<(), String> {
         let mut server = Server::new(None).map_err(|e| format!("{e:#}"))?;
         server.bootstrap();
         let router = HostRouter { shared };
         let mut service = http_proxy_service(&server.configuration, router);
-        service.add_tcp(&bind_addr);
+        service.add_tcp(&config.bind_addr);
+        if let (Some(https_bind_addr), Some(certificate)) =
+            (config.https_bind_addr.as_ref(), config.certificate.as_ref())
+        {
+            let cert_path = path_to_str(&certificate.cert_path)?;
+            let key_path = path_to_str(&certificate.key_path)?;
+            service
+                .add_tls(https_bind_addr, cert_path, key_path)
+                .map_err(|e| format!("{e:#}"))?;
+        }
         server.add_service(service);
         server.run(RunArgs {
             shutdown_signal: Box::new(ManualShutdown { notify: shutdown }),
@@ -322,10 +419,47 @@ mod imp {
         Ok(())
     }
 
+    fn path_to_str(path: &PathBuf) -> std::result::Result<&str, String> {
+        path.to_str()
+            .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
+    }
+
+    async fn respond_text(
+        session: &mut Session,
+        status: u16,
+        value: String,
+    ) -> PingoraResult<()> {
+        let body = Bytes::from(value);
+        let mut response = ResponseHeader::build(status, Some(3))?;
+        response.insert_header("content-type", "text/plain")?;
+        response.set_content_length(body.len())?;
+        session
+            .write_response_header(Box::new(response), false)
+            .await?;
+        session.write_response_body(Some(body), true).await
+    }
+
+    fn acme_challenge_token(session: &Session) -> Option<&str> {
+        let path = session.req_header().uri.path();
+        let token = path.strip_prefix("/.well-known/acme-challenge/")?;
+        (!token.is_empty() && !token.contains('/')).then_some(token)
+    }
+
     fn request_host(session: &Session) -> Option<String> {
         let raw = session.get_header("host")?.to_str().ok()?;
         let normalized = normalize_request_host(raw);
         (!normalized.is_empty()).then_some(normalized)
+    }
+
+    fn route_domains(routes: &[HttpRoute]) -> Vec<String> {
+        let mut domains = routes
+            .iter()
+            .map(|route| normalize_route_host(&route.host))
+            .filter(|host| !host.is_empty())
+            .collect::<Vec<_>>();
+        domains.sort();
+        domains.dedup();
+        domains
     }
 
     fn normalize_route_host(host: &str) -> String {

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use crate::acme::LetsEncryptConfig as AgentLetsEncryptConfig;
 use rathole::config::{
     MaskedString, NoiseConfig, ServerConfig, ServerServiceConfig, ServiceType, TlsConfig,
     TransportConfig, TransportType, WebsocketConfig,
@@ -20,6 +21,9 @@ use crate::protocol::{
     ProcessState, RatholeConfig, RatholeService, ServiceRef, ServiceType as WireServiceType,
     TrafficStat, TransportType as WireTransportType,
 };
+
+const HTTP_PROXY_BIND_ADDR: &str = "[::]:80";
+const HTTPS_PROXY_BIND_ADDR: &str = "[::]:443";
 
 struct Running {
     shutdown: broadcast::Sender<bool>,
@@ -267,8 +271,26 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         return Ok(None);
     }
 
+    let lets_encrypt = http
+        .lets_encrypt
+        .as_ref()
+        .filter(|config| config.enabled)
+        .map(|config| {
+            let email = config.email.trim();
+            if email.is_empty() {
+                anyhow::bail!("Let's Encrypt account email is required");
+            }
+            Ok(AgentLetsEncryptConfig {
+                email: email.to_string(),
+                staging: config.staging.unwrap_or(false),
+            })
+        })
+        .transpose()?;
+
     Ok(Some(AgentHttpProxyConfig {
-        bind_addr: http.bind_addr.clone(),
+        bind_addr: HTTP_PROXY_BIND_ADDR.into(),
+        https_bind_addr: lets_encrypt.as_ref().map(|_| HTTPS_PROXY_BIND_ADDR.into()),
+        lets_encrypt,
         routes,
     }))
 }

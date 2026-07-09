@@ -41,7 +41,10 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 async-trait = "0.1"
-pingora = { version = "0.8.1", default-features = false, features = ["proxy"] }
+bytes = "1"
+instant-acme = { version = "0.8.5", features = ["rcgen"] }
+pingora = { version = "0.8.1", default-features = false, features = ["proxy", "openssl"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 [profile.release]
 strip = true

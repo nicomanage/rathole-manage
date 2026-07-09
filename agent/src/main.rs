@@ -10,6 +10,7 @@
 //!                         enroll this node (saves an identity file)
 //!   rathole-agent run     (default) run the daemon using the saved identity
 
+mod acme;
 mod enroll;
 mod http_proxy;
 mod logcap;

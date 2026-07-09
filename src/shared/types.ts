@@ -25,8 +25,20 @@ export interface RatholeService {
 export interface HttpProxyConfig {
   /** Whether the agent should run its embedded Pingora HTTP reverse proxy. */
   enabled: boolean;
-  /** Public HTTP address Pingora listens on, e.g. "0.0.0.0:80". */
+  /** Fixed public HTTP address Pingora listens on: "[::]:80". */
   bindAddr: string;
+  /** Fixed public HTTPS address Pingora listens on after ACME provisioning: "[::]:443". */
+  httpsBindAddr?: string;
+  /** Optional Let's Encrypt automation for HTTPS virtual hosts. */
+  letsEncrypt?: LetsEncryptConfig;
+}
+
+export interface LetsEncryptConfig {
+  enabled: boolean;
+  /** ACME account contact email. */
+  email: string;
+  /** Use Let's Encrypt staging instead of production. */
+  staging?: boolean;
 }
 
 export interface TlsConfig {

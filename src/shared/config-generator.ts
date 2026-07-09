@@ -11,7 +11,8 @@ export interface ValidationIssue {
 
 type LegacyRatholeService = RatholeService & { domain?: string };
 
-export const DEFAULT_HTTP_BIND_ADDR = "0.0.0.0:80";
+export const HTTP_PROXY_BIND_ADDR = "[::]:80";
+export const HTTPS_PROXY_BIND_ADDR = "[::]:443";
 
 /**
  * Normalize persisted/API configs before editing or saving.
@@ -34,7 +35,15 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
     http: config.http
       ? {
           enabled: !!config.http.enabled,
-          bindAddr: config.http.bindAddr?.trim() || DEFAULT_HTTP_BIND_ADDR,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: config.http.letsEncrypt
+            ? {
+                enabled: !!config.http.letsEncrypt.enabled,
+                email: config.http.letsEncrypt.email?.trim() || "",
+                staging: !!config.http.letsEncrypt.staging,
+              }
+            : undefined,
         }
       : undefined,
     services,
@@ -128,6 +137,10 @@ function validateHttpHost(value: string): string | null {
   return null;
 }
 
+function isLikelyEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 /** Validate a config, returning a list of human-readable problems (empty = ok). */
 export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -141,21 +154,49 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   }
 
   const httpEnabled = !!config.http?.enabled;
+  const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
   const httpRoutes = config.services.filter((svc) => svc.httpHost?.trim());
-  if (httpEnabled || httpRoutes.length > 0) {
-    const httpBindError = validateHostPort(config.http?.bindAddr ?? "", "[::]:80");
-    if (httpBindError) {
+  if (httpEnabled || httpRoutes.length > 0 || letsEncryptEnabled) {
+    const httpBindAddr = config.http?.bindAddr?.trim() || HTTP_PROXY_BIND_ADDR;
+    if (httpBindAddr !== HTTP_PROXY_BIND_ADDR) {
       issues.push({
         path: "http.bindAddr",
-        message: `HTTP proxy bind address ${httpBindError}`,
+        message: `HTTP proxy always listens on ${HTTP_PROXY_BIND_ADDR}.`,
       });
     }
   }
-  if (!httpEnabled && httpRoutes.length > 0) {
+  if (!httpEnabled && (httpRoutes.length > 0 || letsEncryptEnabled)) {
     issues.push({
       path: "http.enabled",
-      message: "Enable the HTTP proxy before assigning HTTP hosts to services.",
+      message: "Enable the HTTP proxy before assigning HTTP hosts or Let's Encrypt.",
     });
+  }
+  if (letsEncryptEnabled) {
+    const httpsBindAddr = config.http?.httpsBindAddr?.trim() || HTTPS_PROXY_BIND_ADDR;
+    if (httpsBindAddr !== HTTPS_PROXY_BIND_ADDR) {
+      issues.push({
+        path: "http.httpsBindAddr",
+        message: `HTTPS proxy always listens on ${HTTPS_PROXY_BIND_ADDR}.`,
+      });
+    }
+    const email = config.http?.letsEncrypt?.email?.trim() ?? "";
+    if (!email) {
+      issues.push({
+        path: "http.letsEncrypt.email",
+        message: "Let's Encrypt account email is required.",
+      });
+    } else if (!isLikelyEmail(email)) {
+      issues.push({
+        path: "http.letsEncrypt.email",
+        message: "Let's Encrypt account email must look like name@example.com.",
+      });
+    }
+    if (httpRoutes.length === 0) {
+      issues.push({
+        path: "http.letsEncrypt.enabled",
+        message: "Assign at least one HTTP host before enabling Let's Encrypt.",
+      });
+    }
   }
 
   const seenHttpHosts = new Set<string>();
@@ -223,7 +264,13 @@ export function defaultConfig(): RatholeConfig {
     transport: "tcp",
     http: {
       enabled: false,
-      bindAddr: DEFAULT_HTTP_BIND_ADDR,
+      bindAddr: HTTP_PROXY_BIND_ADDR,
+      httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+      letsEncrypt: {
+        enabled: false,
+        email: "",
+        staging: false,
+      },
     },
     services: [],
   };

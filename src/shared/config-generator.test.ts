@@ -4,6 +4,9 @@ import {
   generateClientGlobalToml,
   generateClientServiceToml,
   generateClientToml,
+  HTTP_PROXY_BIND_ADDR,
+  HTTPS_PROXY_BIND_ADDR,
+  normalizeConfig,
   validateConfig,
 } from "./config-generator";
 import { hashServerConfig } from "../worker/server-config";
@@ -64,7 +67,7 @@ describe("validateConfig", () => {
   it("requires the HTTP proxy when a service has an HTTP host", () => {
     const issues = validateConfig(
       config({
-        http: { enabled: false, bindAddr: "0.0.0.0:80" },
+        http: { enabled: false, bindAddr: HTTP_PROXY_BIND_ADDR },
         services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
       }),
     );
@@ -75,7 +78,7 @@ describe("validateConfig", () => {
     expect(
       validateConfig(
         config({
-          http: { enabled: true, bindAddr: "0.0.0.0:80" },
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
           services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
         }),
       ),
@@ -85,7 +88,7 @@ describe("validateConfig", () => {
   it("rejects duplicate HTTP hosts", () => {
     const issues = validateConfig(
       config({
-        http: { enabled: true, bindAddr: "0.0.0.0:80" },
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
         services: [
           { name: "web1", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
           { name: "web2", type: "tcp", bindAddr: "0.0.0.0:8081", httpHost: "APP.example.com" },
@@ -98,11 +101,95 @@ describe("validateConfig", () => {
   it("rejects HTTP hosts on UDP services", () => {
     const issues = validateConfig(
       config({
-        http: { enabled: true, bindAddr: "0.0.0.0:80" },
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
         services: [{ name: "dns", type: "udp", bindAddr: "0.0.0.0:5353", httpHost: "dns.example.com" }],
       }),
     );
     expect(issues.some((i) => /must be TCP/.test(i.message))).toBe(true);
+  });
+
+  it("accepts Let's Encrypt when HTTP-01 can bind port 80", () => {
+    expect(
+      validateConfig(
+        config({
+          http: {
+            enabled: true,
+            bindAddr: HTTP_PROXY_BIND_ADDR,
+            httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+            letsEncrypt: { enabled: true, email: "admin@example.com" },
+          },
+          services: [
+            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("rejects a custom HTTP proxy bind address", () => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: "0.0.0.0:8080",
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email: "admin@example.com" },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.bindAddr" && /always listens/.test(i.message))).toBe(true);
+  });
+
+  it("rejects a custom HTTPS proxy bind address", () => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: "0.0.0.0:8443",
+          letsEncrypt: { enabled: true, email: "admin@example.com" },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.httpsBindAddr" && /always listens/.test(i.message))).toBe(true);
+  });
+
+  it("requires a Let's Encrypt account email", () => {
+    const issues = validateConfig(
+      config({
+          http: {
+            enabled: true,
+            bindAddr: HTTP_PROXY_BIND_ADDR,
+            httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+            letsEncrypt: { enabled: true, email: "" },
+          },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+  });
+
+  it("normalizes proxy binds to fixed IPv6 wildcard ports", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: "0.0.0.0:8080",
+          httpsBindAddr: "0.0.0.0:8443",
+          letsEncrypt: { enabled: true, email: "admin@example.com" },
+        },
+      }),
+    );
+    expect(normalized.http?.bindAddr).toBe(HTTP_PROXY_BIND_ADDR);
+    expect(normalized.http?.httpsBindAddr).toBe(HTTPS_PROXY_BIND_ADDR);
   });
 });
 

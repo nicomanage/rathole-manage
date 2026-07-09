@@ -3,9 +3,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
 import {
-  DEFAULT_HTTP_BIND_ADDR,
   generateClientGlobalToml,
   generateClientServiceToml,
+  HTTP_PROXY_BIND_ADDR,
+  HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
   validateConfig,
 } from "@shared/config-generator";
@@ -62,6 +63,7 @@ import {
   RefreshCw,
   Pencil,
   Globe,
+  LockKeyhole,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -383,14 +385,37 @@ function ConfigEditor({
   }
 
   function updateHttp(p: Partial<HttpProxyConfig>) {
-    setConfig((c) => ({
-      ...c,
-      http: {
-        enabled: c.http?.enabled ?? false,
-        bindAddr: c.http?.bindAddr ?? DEFAULT_HTTP_BIND_ADDR,
-        ...p,
-      },
-    }));
+    setConfig((c) => {
+      const { bindAddr: _bindAddr, httpsBindAddr: _httpsBindAddr, ...rest } = p;
+      return {
+        ...c,
+        http: {
+          enabled: c.http?.enabled ?? false,
+          letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
+          ...rest,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+        },
+      };
+    });
+  }
+
+  function updateLetsEncrypt(
+    p: Partial<NonNullable<HttpProxyConfig["letsEncrypt"]>>,
+  ) {
+    setConfig((c) => {
+      const current = c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false };
+      const next = { ...current, ...p };
+      return {
+        ...c,
+        http: {
+          enabled: next.enabled ? true : (c.http?.enabled ?? false),
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: next,
+        },
+      };
+    });
   }
 
   function addService() {
@@ -527,18 +552,58 @@ function ConfigEditor({
               onCheckedChange={(enabled) => updateHttp({ enabled })}
             />
           </div>
-          <div className="space-y-2">
-            <Label>Bind address</Label>
-            <Input
-              aria-invalid={issueByPath.has("http.bindAddr")}
-              className={cn("font-mono", issueByPath.has("http.bindAddr") && "border-destructive")}
-              value={config.http?.bindAddr ?? DEFAULT_HTTP_BIND_ADDR}
-              disabled={!canEdit || !config.http?.enabled}
-              onChange={(e) => updateHttp({ bindAddr: e.target.value })}
+          <div className="rounded-md border px-3 py-2">
+            <Label>HTTP</Label>
+            <p className="mt-1 font-mono text-sm">{HTTP_PROXY_BIND_ADDR}</p>
+          </div>
+          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+            <div>
+              <Label className="flex items-center gap-2">
+                <LockKeyhole className="h-4 w-4 text-muted-foreground" />
+                Let's Encrypt
+              </Label>
+              {issueByPath.has("http.letsEncrypt.enabled") && (
+                <p className="mt-1 text-xs text-destructive">
+                  {issueByPath.get("http.letsEncrypt.enabled")}
+                </p>
+              )}
+            </div>
+            <Switch
+              checked={!!config.http?.letsEncrypt?.enabled}
+              disabled={!canEdit}
+              onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
             />
-            {issueByPath.has("http.bindAddr") && (
-              <p className="text-xs text-destructive">{issueByPath.get("http.bindAddr")}</p>
+          </div>
+          <div className="rounded-md border px-3 py-2">
+            <Label>HTTPS</Label>
+            <p className="mt-1 font-mono text-sm">{HTTPS_PROXY_BIND_ADDR}</p>
+          </div>
+          <div className="space-y-2">
+            <Label>ACME email</Label>
+            <Input
+              aria-invalid={issueByPath.has("http.letsEncrypt.email")}
+              className={cn(
+                "font-mono",
+                issueByPath.has("http.letsEncrypt.email") && "border-destructive",
+              )}
+              placeholder="admin@example.com"
+              value={config.http?.letsEncrypt?.email ?? ""}
+              disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
+              onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
+            />
+            {issueByPath.has("http.letsEncrypt.email") && (
+              <p className="text-xs text-destructive">
+                {issueByPath.get("http.letsEncrypt.email")}
+              </p>
             )}
+          </div>
+          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+            <Label>Staging</Label>
+            <Switch
+              checked={!!config.http?.letsEncrypt?.staging}
+              disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
+              onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
+            />
           </div>
         </CardContent>
       </Card>
@@ -838,7 +903,7 @@ function AgentSetup({
         <CardContent className="space-y-4 text-sm">
           <p className="text-muted-foreground">
             The agent is a small Rust binary that depends on the <code className="font-mono">rathole</code>{" "}
-            crate, embeds a Pingora HTTP proxy, and runs both <span className="font-medium">in-process</span>.
+            crate, embeds a Pingora HTTP/HTTPS proxy, and runs both <span className="font-medium">in-process</span>.
             Nodes enroll themselves via <code className="font-mono">rathole-agent login</code>; this
             instance was created by that flow. Source is in <code className="font-mono">/agent</code>.
           </p>
