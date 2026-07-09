@@ -236,10 +236,25 @@ describe("validateConfig", () => {
   it("normalizes legacy TCP HTTP-host services to HTTP services", () => {
     const normalized = normalizeConfig(
       config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
         services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
       }),
     );
     expect(normalized.services[0].type).toBe("http");
+  });
+
+  it("removes HTTP service types when the HTTP service is disabled", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: { enabled: false, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          { name: "web", type: "http", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          { name: "secure", type: "https", bindAddr: "0.0.0.0:8443", httpHost: "secure.example.com" },
+        ],
+      }),
+    );
+    expect(normalized.services.map((service) => service.type)).toEqual(["tcp", "tcp"]);
+    expect(normalized.services.every((service) => service.httpHost === undefined)).toBe(true);
   });
 });
 

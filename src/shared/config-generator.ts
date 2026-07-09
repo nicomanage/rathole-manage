@@ -32,11 +32,18 @@ function hasHttpRoute(svc: RatholeService): boolean {
 export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
+  const httpEnabled = !!config.http?.enabled;
   const services = legacyServices.map(({ domain: _domain, ...service }) => {
-    const httpHost = service.httpHost?.trim() || undefined;
+    const httpHost = httpEnabled ? service.httpHost?.trim() || undefined : undefined;
+    const serviceType =
+      !httpEnabled && isHttpService(service)
+        ? "tcp"
+        : httpHost && service.type === "tcp"
+          ? "http"
+          : service.type;
     return {
       ...service,
-      type: httpHost && service.type === "tcp" ? "http" : service.type,
+      type: serviceType,
       httpHost,
     };
   });

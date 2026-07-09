@@ -69,7 +69,12 @@ import {
 import { toast } from "sonner";
 
 const TRANSPORTS: TransportType[] = ["tcp", "tls", "noise", "websocket"];
-const SERVICE_TYPES: ServiceType[] = ["tcp", "udp", "http", "https"];
+const BASIC_SERVICE_TYPES: ServiceType[] = ["tcp", "udp"];
+const HTTP_SERVICE_TYPES: ServiceType[] = ["tcp", "udp", "http", "https"];
+
+function isHttpServiceType(type: ServiceType): boolean {
+  return type === "http" || type === "https";
+}
 
 export function InstanceDetail() {
   const { id = "" } = useParams();
@@ -386,19 +391,29 @@ function ConfigEditor({
   }
 
   function updateServiceType(i: number, type: ServiceType) {
+    const nextType = config.http?.enabled ? type : "tcp";
     updateService(i, {
-      type,
-      ...(type === "http" || type === "https" ? {} : { httpHost: undefined }),
+      type: nextType,
+      ...(isHttpServiceType(nextType) ? {} : { httpHost: undefined }),
     });
   }
 
   function updateHttp(p: Partial<HttpProxyConfig>) {
     setConfig((c) => {
       const { bindAddr: _bindAddr, httpsBindAddr: _httpsBindAddr, ...rest } = p;
+      const enabled = rest.enabled ?? c.http?.enabled ?? false;
+      const services = enabled
+        ? c.services
+        : c.services.map((service) =>
+            isHttpServiceType(service.type)
+              ? { ...service, type: "tcp" as const, httpHost: undefined }
+              : service,
+          );
       return {
         ...c,
+        services,
         http: {
-          enabled: c.http?.enabled ?? false,
+          enabled,
           letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
           ...rest,
           bindAddr: HTTP_PROXY_BIND_ADDR,
@@ -464,6 +479,8 @@ function ConfigEditor({
     if (!online || !serviceStatus || !(name in serviceStatus)) return "unknown";
     return serviceStatus[name] ? "online" : "offline";
   }
+
+  const serviceTypes = config.http?.enabled ? HTTP_SERVICE_TYPES : BASIC_SERVICE_TYPES;
 
   const validationPanel =
     issues.length > 0 ? (
@@ -697,7 +714,7 @@ function ConfigEditor({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {SERVICE_TYPES.map((type) => (
+                            {serviceTypes.map((type) => (
                               <SelectItem key={type} value={type}>
                                 {type}
                               </SelectItem>
