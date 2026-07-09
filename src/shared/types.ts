@@ -2,7 +2,7 @@
 // Keep this file free of any runtime/platform imports so both sides can use it.
 
 export type TransportType = "tcp" | "tls" | "noise" | "websocket";
-export type ServiceType = "tcp" | "udp";
+export type ServiceType = "tcp" | "udp" | "http" | "https";
 
 /** A single forwarded service inside a rathole server instance. */
 export interface RatholeService {
@@ -13,8 +13,9 @@ export interface RatholeService {
   bindAddr: string;
   /**
    * Optional HTTP virtual host handled by the agent's embedded Pingora proxy.
-   * When set, requests for this Host are reverse-proxied to this service's
-   * public bind address.
+   * Required for services whose panel type is `http` or `https`.
+   * Requests for this Host are reverse-proxied to this service's public bind
+   * address.
    */
   httpHost?: string;
   /** Optional per-service token; falls back to the instance default token. */

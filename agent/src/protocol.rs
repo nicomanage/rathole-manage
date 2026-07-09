@@ -23,6 +23,8 @@ pub enum TransportType {
 pub enum ServiceType {
     Tcp,
     Udp,
+    Http,
+    Https,
 }
 
 #[derive(Debug, Clone, Deserialize)]

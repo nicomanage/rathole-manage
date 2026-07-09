@@ -230,6 +230,7 @@ fn service_type(kind: WireServiceType) -> ServiceType {
     match kind {
         WireServiceType::Tcp => ServiceType::Tcp,
         WireServiceType::Udp => ServiceType::Udp,
+        WireServiceType::Http | WireServiceType::Https => ServiceType::Tcp,
     }
 }
 

@@ -14,6 +14,14 @@ type LegacyRatholeService = RatholeService & { domain?: string };
 export const HTTP_PROXY_BIND_ADDR = "[::]:80";
 export const HTTPS_PROXY_BIND_ADDR = "[::]:443";
 
+function isHttpService(svc: RatholeService): boolean {
+  return svc.type === "http" || svc.type === "https";
+}
+
+function hasHttpRoute(svc: RatholeService): boolean {
+  return isHttpService(svc);
+}
+
 /**
  * Normalize persisted/API configs before editing or saving.
  *
@@ -24,10 +32,14 @@ export const HTTPS_PROXY_BIND_ADDR = "[::]:443";
 export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
-  const services = legacyServices.map(({ domain: _domain, ...service }) => ({
-    ...service,
-    httpHost: service.httpHost?.trim() || undefined,
-  }));
+  const services = legacyServices.map(({ domain: _domain, ...service }) => {
+    const httpHost = service.httpHost?.trim() || undefined;
+    return {
+      ...service,
+      type: httpHost && service.type === "tcp" ? "http" : service.type,
+      httpHost,
+    };
+  });
 
   return {
     ...config,
@@ -155,7 +167,7 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
 
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
-  const httpRoutes = config.services.filter((svc) => svc.httpHost?.trim());
+  const httpRoutes = config.services.filter(hasHttpRoute);
   if (httpEnabled || httpRoutes.length > 0 || letsEncryptEnabled) {
     const httpBindAddr = config.http?.bindAddr?.trim() || HTTP_PROXY_BIND_ADDR;
     if (httpBindAddr !== HTTP_PROXY_BIND_ADDR) {
@@ -219,6 +231,12 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
 
     const httpHost = svc.httpHost?.trim();
+    if (isHttpService(svc) && !httpHost) {
+      issues.push({
+        path: `${base}.httpHost`,
+        message: `Service "${svc.name || i}" needs an HTTP host.`,
+      });
+    }
     if (httpHost) {
       const httpHostError = validateHttpHost(svc.httpHost ?? "");
       if (httpHostError) {
@@ -227,10 +245,22 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
           message: `Service "${svc.name || i}" HTTP host ${httpHostError}`,
         });
       }
-      if (svc.type !== "tcp") {
+      if (svc.type === "udp") {
         issues.push({
           path: `${base}.httpHost`,
-          message: `Service "${svc.name || i}" must be TCP to receive HTTP proxy traffic.`,
+          message: `Service "${svc.name || i}" cannot be UDP and receive HTTP proxy traffic.`,
+        });
+      }
+      if (svc.type === "tcp") {
+        issues.push({
+          path: `${base}.httpHost`,
+          message: `Service "${svc.name || i}" must be HTTP or HTTPS to use an HTTP host.`,
+        });
+      }
+      if (svc.type === "https" && !letsEncryptEnabled) {
+        issues.push({
+          path: "http.letsEncrypt.enabled",
+          message: `Enable Let's Encrypt before using HTTPS service "${svc.name || i}".`,
         });
       }
       const key = httpHost.toLowerCase();
@@ -328,8 +358,12 @@ function localHint(name: string): string {
 }
 
 function serviceLocalHint(service: RatholeService): string {
-  if (service.httpHost?.trim()) return "127.0.0.1:80";
+  if (hasHttpRoute(service)) return "127.0.0.1:80";
   return localHint(service.name);
+}
+
+function ratholeServiceType(service: RatholeService): "tcp" | "udp" {
+  return service.type === "udp" ? "udp" : "tcp";
 }
 
 /** The `[client]` + `[client.transport]` lines (no services). */
@@ -360,7 +394,7 @@ function clientGlobalLines(config: RatholeConfig, publicIp?: string): string[] {
 function clientServiceLines(svc: RatholeService): string[] {
   const out = [
     `[client.services.${serviceKey(svc.name)}]`,
-    `type = ${q(svc.type)}`,
+    `type = ${q(ratholeServiceType(svc))}`,
     `local_addr = ${q(serviceLocalHint(svc))}`,
   ];
   if (svc.token?.trim()) out.push(`token = ${q(svc.token)}`);

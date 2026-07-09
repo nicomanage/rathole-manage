@@ -5,8 +5,6 @@ import { api } from "@/lib/api";
 import {
   generateClientGlobalToml,
   generateClientServiceToml,
-  HTTP_PROXY_BIND_ADDR,
-  HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
   validateConfig,
 } from "@shared/config-generator";
@@ -16,6 +14,7 @@ import type {
   InstanceView,
   RatholeConfig,
   RatholeService,
+  ServiceType,
   TrafficStat,
   TransportType,
 } from "@shared/types";
@@ -68,6 +67,7 @@ import {
 import { toast } from "sonner";
 
 const TRANSPORTS: TransportType[] = ["tcp", "tls", "noise", "websocket"];
+const SERVICE_TYPES: ServiceType[] = ["tcp", "udp", "http", "https"];
 
 export function InstanceDetail() {
   const { id = "" } = useParams();
@@ -184,22 +184,21 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
+          <TabsTrigger value="services">Services</TabsTrigger>
           <TabsTrigger value="client">Client config</TabsTrigger>
           <TabsTrigger value="traffic">Traffic</TabsTrigger>
           <TabsTrigger value="logs">Live logs</TabsTrigger>
           <TabsTrigger value="agent">Agent setup</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="config">
-          <ConfigEditor
-            id={id}
-            initial={instance.config}
-            serviceStatus={instance.serviceStatus}
-            traffic={instance.traffic}
-            online={instance.status === "online"}
-            canEdit={isAdmin}
-          />
-        </TabsContent>
+        <ConfigEditor
+          id={id}
+          initial={instance.config}
+          serviceStatus={instance.serviceStatus}
+          traffic={instance.traffic}
+          online={instance.status === "online"}
+          canEdit={isAdmin}
+        />
         <TabsContent value="client">
           <ClientConfig config={instance.config} publicIp={instance.publicIp} />
         </TabsContent>
@@ -384,6 +383,13 @@ function ConfigEditor({
     });
   }
 
+  function updateServiceType(i: number, type: ServiceType) {
+    updateService(i, {
+      type,
+      ...(type === "http" || type === "https" ? {} : { httpHost: undefined }),
+    });
+  }
+
   function updateHttp(p: Partial<HttpProxyConfig>) {
     setConfig((c) => {
       const { bindAddr: _bindAddr, httpsBindAddr: _httpsBindAddr, ...rest } = p;
@@ -393,8 +399,8 @@ function ConfigEditor({
           enabled: c.http?.enabled ?? false,
           letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
           ...rest,
-          bindAddr: HTTP_PROXY_BIND_ADDR,
-          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          bindAddr: "[::]:80",
+          httpsBindAddr: "[::]:443",
         },
       };
     });
@@ -410,8 +416,8 @@ function ConfigEditor({
         ...c,
         http: {
           enabled: next.enabled ? true : (c.http?.enabled ?? false),
-          bindAddr: HTTP_PROXY_BIND_ADDR,
-          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          bindAddr: "[::]:80",
+          httpsBindAddr: "[::]:443",
           letsEncrypt: next,
         },
       };
@@ -457,13 +463,39 @@ function ConfigEditor({
     return serviceStatus[name] ? "online" : "offline";
   }
 
+  const validationPanel =
+    issues.length > 0 ? (
+      <Card className="border-destructive/40">
+        <CardContent className="space-y-1.5 py-4 text-sm">
+          {issues.map((iss, i) => (
+            <p key={i} className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              {iss.message}
+            </p>
+          ))}
+        </CardContent>
+      </Card>
+    ) : null;
+
+  const saveBar = canEdit ? (
+    <div className="sticky bottom-4 flex items-center justify-end gap-3">
+      {dirty && <span className="text-sm text-muted-foreground">Unsaved changes</span>}
+      <Button onClick={save} disabled={!dirty || saving || issues.length > 0}>
+        <Save className="h-4 w-4" />
+        {saving ? "Saving…" : "Save & push"}
+      </Button>
+    </div>
+  ) : null;
+
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Control channel</CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
+    <>
+      <TabsContent value="config">
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Control channel</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label>Bind address</Label>
             <Input
@@ -535,7 +567,7 @@ function ConfigEditor({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Globe className="h-4 w-4 text-muted-foreground" />
-            HTTP proxy
+            HTTP service
           </CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
@@ -551,10 +583,6 @@ function ConfigEditor({
               disabled={!canEdit}
               onCheckedChange={(enabled) => updateHttp({ enabled })}
             />
-          </div>
-          <div className="rounded-md border px-3 py-2">
-            <Label>HTTP</Label>
-            <p className="mt-1 font-mono text-sm">{HTTP_PROXY_BIND_ADDR}</p>
           </div>
           <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
             <div>
@@ -573,10 +601,6 @@ function ConfigEditor({
               disabled={!canEdit}
               onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
             />
-          </div>
-          <div className="rounded-md border px-3 py-2">
-            <Label>HTTPS</Label>
-            <p className="mt-1 font-mono text-sm">{HTTPS_PROXY_BIND_ADDR}</p>
           </div>
           <div className="space-y-2">
             <Label>ACME email</Label>
@@ -608,6 +632,13 @@ function ConfigEditor({
         </CardContent>
       </Card>
 
+          {validationPanel}
+          {saveBar}
+        </div>
+      </TabsContent>
+
+      <TabsContent value="services">
+        <div className="space-y-6">
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Services ({config.services.length})</CardTitle>
@@ -658,14 +689,17 @@ function ConfigEditor({
                         <Select
                           value={svc.type}
                           disabled={!canEdit}
-                          onValueChange={(v) => updateService(i, { type: v as "tcp" | "udp" })}
+                          onValueChange={(v) => updateServiceType(i, v as ServiceType)}
                         >
                           <SelectTrigger className="h-8">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="tcp">tcp</SelectItem>
-                            <SelectItem value="udp">udp</SelectItem>
+                            {SERVICE_TYPES.map((type) => (
+                              <SelectItem key={type} value={type}>
+                                {type}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </TableCell>
@@ -675,7 +709,7 @@ function ConfigEditor({
                           className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
                           placeholder="app.example.com"
                           value={svc.httpHost ?? ""}
-                          disabled={!canEdit || !config.http?.enabled}
+                          disabled={!canEdit || (svc.type !== "http" && svc.type !== "https")}
                           onChange={(e) => updateService(i, { httpHost: e.target.value })}
                         />
                         {httpHostIssue && (
@@ -741,29 +775,11 @@ function ConfigEditor({
         </CardContent>
       </Card>
 
-      {issues.length > 0 && (
-        <Card className="border-destructive/40">
-          <CardContent className="space-y-1.5 py-4 text-sm">
-            {issues.map((iss, i) => (
-              <p key={i} className="flex items-center gap-2 text-destructive">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                {iss.message}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {canEdit && (
-        <div className="sticky bottom-4 flex items-center justify-end gap-3">
-          {dirty && <span className="text-sm text-muted-foreground">Unsaved changes</span>}
-          <Button onClick={save} disabled={!dirty || saving || issues.length > 0}>
-            <Save className="h-4 w-4" />
-            {saving ? "Saving…" : "Save & push"}
-          </Button>
+          {validationPanel}
+          {saveBar}
         </div>
-      )}
-    </div>
+      </TabsContent>
+    </>
   );
 }
 
@@ -800,7 +816,7 @@ function ClientConfig({ config, publicIp }: { config: RatholeConfig; publicIp?: 
         <CardContent className="space-y-4">
           {config.services.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No services yet. Add services in the Configuration tab first.
+              No services yet. Add services in the Services tab first.
             </p>
           ) : (
             config.services.map((svc, i) => (
