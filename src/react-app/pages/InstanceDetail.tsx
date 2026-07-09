@@ -5,6 +5,8 @@ import { api } from "@/lib/api";
 import {
   generateClientGlobalToml,
   generateClientServiceToml,
+  HTTP_PROXY_BIND_ADDR,
+  HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
   validateConfig,
 } from "@shared/config-generator";
@@ -399,8 +401,8 @@ function ConfigEditor({
           enabled: c.http?.enabled ?? false,
           letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
           ...rest,
-          bindAddr: "[::]:80",
-          httpsBindAddr: "[::]:443",
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
         },
       };
     });
@@ -416,8 +418,8 @@ function ConfigEditor({
         ...c,
         http: {
           enabled: next.enabled ? true : (c.http?.enabled ?? false),
-          bindAddr: "[::]:80",
-          httpsBindAddr: "[::]:443",
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
           letsEncrypt: next,
         },
       };
