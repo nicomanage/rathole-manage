@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use crate::acme::LetsEncryptConfig as AgentLetsEncryptConfig;
+use anyhow::{Context, Result};
 use rathole::config::{
     MaskedString, NoiseConfig, ServerConfig, ServerServiceConfig, ServiceType, TlsConfig,
     TransportConfig, TransportType, WebsocketConfig,
@@ -14,9 +14,7 @@ use rathole::config::{
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::http_proxy::{
-    HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute,
-};
+use crate::http_proxy::{HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute};
 use crate::protocol::{
     DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
     ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
@@ -144,7 +142,8 @@ impl Runner {
                 bind_addr: svc.bind_addr.clone(),
             })
             .collect::<Vec<_>>();
-        let http_config = http_proxy_config(&config).context("building Pingora HTTP proxy config")?;
+        let http_config =
+            http_proxy_config(&config).context("building Pingora HTTP proxy config")?;
         let server = to_server_config(config).context("building rathole server config")?;
         self.services = services;
         self.http_config = http_config;

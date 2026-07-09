@@ -50,8 +50,8 @@ mod imp {
     use super::{CertificatePaths, ChallengeStore, LetsEncryptConfig};
     use anyhow::{bail, Context, Result};
     use instant_acme::{
-        Account, AccountCredentials, AuthorizationStatus, ChallengeType, CryptoProvider,
-        DefaultClient, Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
+        Account, AccountBuilder, AccountCredentials, AuthorizationStatus, ChallengeType,
+        Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
     };
     use openssl::asn1::Asn1Time;
     use openssl::x509::X509;
@@ -96,10 +96,15 @@ mod imp {
                 return Ok(paths);
             }
 
-            fs::create_dir_all(&cert_dir)
-                .with_context(|| format!("creating ACME certificate directory {}", cert_dir.display()))?;
-            fs::create_dir_all(&environment_dir)
-                .with_context(|| format!("creating ACME account directory {}", environment_dir.display()))?;
+            fs::create_dir_all(&cert_dir).with_context(|| {
+                format!("creating ACME certificate directory {}", cert_dir.display())
+            })?;
+            fs::create_dir_all(&environment_dir).with_context(|| {
+                format!(
+                    "creating ACME account directory {}",
+                    environment_dir.display()
+                )
+            })?;
 
             tracing::info!(
                 domains = ?domains,
@@ -149,11 +154,7 @@ mod imp {
                         .challenge(ChallengeType::Http01)
                         .context("ACME server did not offer an HTTP-01 challenge")?;
                     let token = challenge.token.clone();
-                    let key_authorization = challenge
-                        .key_authorization()
-                        .context("building ACME HTTP-01 key authorization")?
-                        .as_str()
-                        .to_string();
+                    let key_authorization = challenge.key_authorization().as_str().to_string();
                     self.challenges.insert(token.clone(), key_authorization);
                     active_tokens.push(token);
                     challenge
@@ -233,14 +234,8 @@ mod imp {
         Ok(account)
     }
 
-    fn account_builder() -> Result<instant_acme::AccountBuilder> {
-        let provider = CryptoProvider::aws_lc_rs();
-        let rustls_provider = rustls::crypto::aws_lc_rs::default_provider();
-        Account::builder(
-            Box::new(DefaultClient::new(Arc::new(rustls_provider))?),
-            provider,
-        )
-        .context("building ACME account client")
+    fn account_builder() -> Result<AccountBuilder> {
+        Account::builder().context("building ACME account client")
     }
 
     fn certificate_is_fresh(
@@ -269,8 +264,8 @@ mod imp {
                 return Ok(false);
             }
         };
-        let threshold =
-            Asn1Time::days_from_now(RENEW_BEFORE_DAYS).context("computing certificate renewal threshold")?;
+        let threshold = Asn1Time::days_from_now(RENEW_BEFORE_DAYS)
+            .context("computing certificate renewal threshold")?;
         Ok(cert
             .not_after()
             .compare(&threshold)

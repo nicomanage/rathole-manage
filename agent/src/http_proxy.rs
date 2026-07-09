@@ -31,8 +31,8 @@ mod imp {
     use std::collections::HashMap;
     use std::future::Future;
     use std::net::TcpListener;
-    use std::path::PathBuf;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
     use std::sync::{Arc, RwLock};
@@ -308,7 +308,8 @@ mod imp {
             {
                 return Ok(());
             }
-            self.ensure_running(RuntimeConfig::http_only(bind_addr)).await
+            self.ensure_running(RuntimeConfig::http_only(bind_addr))
+                .await
         }
 
         async fn ensure_running(&mut self, config: RuntimeConfig) -> AnyResult<()> {
@@ -424,11 +425,7 @@ mod imp {
             .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
     }
 
-    async fn respond_text(
-        session: &mut Session,
-        status: u16,
-        value: String,
-    ) -> PingoraResult<()> {
+    async fn respond_text(session: &mut Session, status: u16, value: String) -> PingoraResult<()> {
         let body = Bytes::from(value);
         let mut response = ResponseHeader::build(status, Some(3))?;
         response.insert_header("content-type", "text/plain")?;
