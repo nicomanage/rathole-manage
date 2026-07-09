@@ -33,7 +33,7 @@ try {
 Move-Item -LiteralPath (Join-Path $tmp "vendor\rathole-$version") -Destination $dest
 
 $patch = Join-Path $root "patches\rathole-direct-api.patch"
-git -C $root apply --directory=vendor/rathole $patch
+git -C $root apply --ignore-whitespace --directory=vendor/rathole $patch
 if ($LASTEXITCODE -ne 0) {
     throw "failed to apply rathole patch"
 }

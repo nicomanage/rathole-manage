@@ -11,9 +11,22 @@ export interface RatholeService {
   type: ServiceType;
   /** Public address rathole listens on for this service, e.g. "0.0.0.0:5202". */
   bindAddr: string;
+  /**
+   * Optional HTTP virtual host handled by the agent's embedded Pingora proxy.
+   * When set, requests for this Host are reverse-proxied to this service's
+   * public bind address.
+   */
+  httpHost?: string;
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;
   nodelay?: boolean;
+}
+
+export interface HttpProxyConfig {
+  /** Whether the agent should run its embedded Pingora HTTP reverse proxy. */
+  enabled: boolean;
+  /** Public HTTP address Pingora listens on, e.g. "0.0.0.0:80". */
+  bindAddr: string;
 }
 
 export interface TlsConfig {
@@ -48,6 +61,7 @@ export interface RatholeConfig {
   tls?: TlsConfig;
   noise?: NoiseConfig;
   websocket?: WebsocketConfig;
+  http?: HttpProxyConfig;
   heartbeatInterval?: number;
   services: RatholeService[];
 }

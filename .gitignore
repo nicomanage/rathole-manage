@@ -16,6 +16,12 @@ agent/target/
 vendor/
 .tmp-rathole-*/
 
+# local ad-hoc Rust toolchains/installers used for workspace-only checks
+.codex-cargo/
+.codex-rustup/
+rustup-init.exe
+.codex-rustup-init.exe
+
 # env & secrets
 .dev.vars
 .env

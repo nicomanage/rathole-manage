@@ -11,6 +11,8 @@ export interface ValidationIssue {
 
 type LegacyRatholeService = RatholeService & { domain?: string };
 
+export const DEFAULT_HTTP_BIND_ADDR = "0.0.0.0:80";
+
 /**
  * Normalize persisted/API configs before editing or saving.
  *
@@ -21,11 +23,20 @@ type LegacyRatholeService = RatholeService & { domain?: string };
 export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
-  const services = legacyServices.map(({ domain: _domain, ...service }) => service);
+  const services = legacyServices.map(({ domain: _domain, ...service }) => ({
+    ...service,
+    httpHost: service.httpHost?.trim() || undefined,
+  }));
 
   return {
     ...config,
     domain: config.domain ?? legacyDomain,
+    http: config.http
+      ? {
+          enabled: !!config.http.enabled,
+          bindAddr: config.http.bindAddr?.trim() || DEFAULT_HTTP_BIND_ADDR,
+        }
+      : undefined,
     services,
   };
 }
@@ -105,6 +116,18 @@ function isValidIpv6Host(host: string): boolean {
   }
 }
 
+function validateHttpHost(value: string): string | null {
+  const input = value.trim();
+  if (!input) return null;
+  if (input !== value || /\s/.test(input)) return "must not contain whitespace.";
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(input) || input.includes("/")) {
+    return "must be only a hostname, without a URL scheme or path.";
+  }
+  if (input.includes(":")) return "must not include a port.";
+  if (!isValidHostname(input)) return "must be a valid hostname such as app.example.com.";
+  return null;
+}
+
 /** Validate a config, returning a list of human-readable problems (empty = ok). */
 export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -117,6 +140,25 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     });
   }
 
+  const httpEnabled = !!config.http?.enabled;
+  const httpRoutes = config.services.filter((svc) => svc.httpHost?.trim());
+  if (httpEnabled || httpRoutes.length > 0) {
+    const httpBindError = validateHostPort(config.http?.bindAddr ?? "", "[::]:80");
+    if (httpBindError) {
+      issues.push({
+        path: "http.bindAddr",
+        message: `HTTP proxy bind address ${httpBindError}`,
+      });
+    }
+  }
+  if (!httpEnabled && httpRoutes.length > 0) {
+    issues.push({
+      path: "http.enabled",
+      message: "Enable the HTTP proxy before assigning HTTP hosts to services.",
+    });
+  }
+
+  const seenHttpHosts = new Set<string>();
   const seen = new Set<string>();
   config.services.forEach((svc, i) => {
     const base = `services[${i}]`;
@@ -133,6 +175,31 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
         path: `${base}.bindAddr`,
         message: `Service "${svc.name || i}" public bind address ${publicBindError}`,
       });
+    }
+
+    const httpHost = svc.httpHost?.trim();
+    if (httpHost) {
+      const httpHostError = validateHttpHost(svc.httpHost ?? "");
+      if (httpHostError) {
+        issues.push({
+          path: `${base}.httpHost`,
+          message: `Service "${svc.name || i}" HTTP host ${httpHostError}`,
+        });
+      }
+      if (svc.type !== "tcp") {
+        issues.push({
+          path: `${base}.httpHost`,
+          message: `Service "${svc.name || i}" must be TCP to receive HTTP proxy traffic.`,
+        });
+      }
+      const key = httpHost.toLowerCase();
+      if (seenHttpHosts.has(key)) {
+        issues.push({
+          path: `${base}.httpHost`,
+          message: `Duplicate HTTP host "${httpHost}".`,
+        });
+      }
+      seenHttpHosts.add(key);
     }
   });
 
@@ -154,6 +221,10 @@ export function defaultConfig(): RatholeConfig {
     bindAddr: "0.0.0.0:2333",
     defaultToken: "",
     transport: "tcp",
+    http: {
+      enabled: false,
+      bindAddr: DEFAULT_HTTP_BIND_ADDR,
+    },
     services: [],
   };
 }
@@ -209,6 +280,11 @@ function localHint(name: string): string {
   return "127.0.0.1:8080";
 }
 
+function serviceLocalHint(service: RatholeService): string {
+  if (service.httpHost?.trim()) return "127.0.0.1:80";
+  return localHint(service.name);
+}
+
 /** The `[client]` + `[client.transport]` lines (no services). */
 function clientGlobalLines(config: RatholeConfig, publicIp?: string): string[] {
   const { port } = splitHostPort(config.bindAddr);
@@ -238,7 +314,7 @@ function clientServiceLines(svc: RatholeService): string[] {
   const out = [
     `[client.services.${serviceKey(svc.name)}]`,
     `type = ${q(svc.type)}`,
-    `local_addr = ${q(localHint(svc.name))}`,
+    `local_addr = ${q(serviceLocalHint(svc))}`,
   ];
   if (svc.token?.trim()) out.push(`token = ${q(svc.token)}`);
   if (svc.nodelay !== undefined) out.push(`nodelay = ${svc.nodelay ? "true" : "false"}`);

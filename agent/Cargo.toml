@@ -39,6 +39,10 @@ crossterm = "0.28"
 # aarch64 in CI without needing a system OpenSSL for each target.
 openssl = { version = "0.10", features = ["vendored"] }
 
+[target.'cfg(unix)'.dependencies]
+async-trait = "0.1"
+pingora = { version = "0.8.1", default-features = false, features = ["proxy"] }
+
 [profile.release]
 strip = true
 lto = "thin"

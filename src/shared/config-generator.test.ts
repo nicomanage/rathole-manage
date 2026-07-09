@@ -60,6 +60,50 @@ describe("validateConfig", () => {
     );
     expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
   });
+
+  it("requires the HTTP proxy when a service has an HTTP host", () => {
+    const issues = validateConfig(
+      config({
+        http: { enabled: false, bindAddr: "0.0.0.0:80" },
+        services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.enabled")).toBe(true);
+  });
+
+  it("accepts a valid Pingora HTTP route", () => {
+    expect(
+      validateConfig(
+        config({
+          http: { enabled: true, bindAddr: "0.0.0.0:80" },
+          services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("rejects duplicate HTTP hosts", () => {
+    const issues = validateConfig(
+      config({
+        http: { enabled: true, bindAddr: "0.0.0.0:80" },
+        services: [
+          { name: "web1", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          { name: "web2", type: "tcp", bindAddr: "0.0.0.0:8081", httpHost: "APP.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => /duplicate/i.test(i.message))).toBe(true);
+  });
+
+  it("rejects HTTP hosts on UDP services", () => {
+    const issues = validateConfig(
+      config({
+        http: { enabled: true, bindAddr: "0.0.0.0:80" },
+        services: [{ name: "dns", type: "udp", bindAddr: "0.0.0.0:5353", httpHost: "dns.example.com" }],
+      }),
+    );
+    expect(issues.some((i) => /must be TCP/.test(i.message))).toBe(true);
+  });
 });
 
 describe("generateClientToml", () => {
@@ -73,6 +117,16 @@ describe("generateClientToml", () => {
     const toml = generateClientToml(config());
     expect(toml).toContain("[client.services.ssh]");
     expect(toml).toContain('local_addr = "127.0.0.1:22"');
+  });
+
+  it("uses port 80 as the local_addr default for HTTP-routed services", () => {
+    const toml = generateClientToml(
+      config({
+        services: [{ name: "app", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" }],
+      }),
+    );
+    expect(toml).toContain("[client.services.app]");
+    expect(toml).toContain('local_addr = "127.0.0.1:80"');
   });
 
   it("falls back to a placeholder host when domain and bind host are unset", () => {

@@ -11,6 +11,7 @@
 //!   rathole-agent run     (default) run the daemon using the saved identity
 
 mod enroll;
+mod http_proxy;
 mod logcap;
 mod protocol;
 mod runner;
@@ -380,7 +381,7 @@ async fn handle_hub_message(
             tracing::info!(?command, "executing command");
             let mut guard = runner.lock().await;
             let result = match command {
-                AgentCommand::Start => guard.start(),
+                AgentCommand::Start => guard.start().await,
                 AgentCommand::Stop => {
                     guard.stop().await;
                     Ok(())

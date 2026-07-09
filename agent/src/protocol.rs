@@ -32,8 +32,16 @@ pub struct RatholeService {
     #[serde(rename = "type")]
     pub service_type: ServiceType,
     pub bind_addr: String,
+    pub http_host: Option<String>,
     pub token: Option<String>,
     pub nodelay: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpProxyConfig {
+    pub enabled: bool,
+    pub bind_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +77,7 @@ pub struct RatholeConfig {
     pub tls: Option<TlsConfig>,
     pub noise: Option<NoiseConfig>,
     pub websocket: Option<WebsocketConfig>,
+    pub http: Option<HttpProxyConfig>,
     pub heartbeat_interval: Option<u64>,
     pub services: Vec<RatholeService>,
 }

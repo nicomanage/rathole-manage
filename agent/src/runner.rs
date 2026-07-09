@@ -13,6 +13,9 @@ use rathole::config::{
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
+use crate::http_proxy::{
+    HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute,
+};
 use crate::protocol::{
     ProcessState, RatholeConfig, RatholeService, ServiceRef, ServiceType as WireServiceType,
     TrafficStat, TransportType as WireTransportType,
@@ -25,6 +28,8 @@ struct Running {
 
 pub struct Runner {
     config: Option<ServerConfig>,
+    http_config: Option<AgentHttpProxyConfig>,
+    http_proxy: HttpProxyRunner,
     services: Vec<ServiceRef>,
     inner: Option<Running>,
     last_error: Option<String>,
@@ -34,6 +39,8 @@ impl Runner {
     pub fn new() -> Self {
         Self {
             config: None,
+            http_config: None,
+            http_proxy: HttpProxyRunner::new(),
             services: Vec::new(),
             inner: None,
             last_error: None,
@@ -58,6 +65,10 @@ impl Runner {
     }
 
     pub async fn refresh(&mut self) {
+        if let Some(msg) = self.http_proxy.refresh() {
+            self.last_error = Some(msg);
+        }
+
         if !self.inner.as_ref().is_some_and(|r| r.handle.is_finished()) {
             return;
         }
@@ -125,8 +136,10 @@ impl Runner {
                 bind_addr: svc.bind_addr.clone(),
             })
             .collect::<Vec<_>>();
+        let http_config = http_proxy_config(&config).context("building Pingora HTTP proxy config")?;
         let server = to_server_config(config).context("building rathole server config")?;
         self.services = services;
+        self.http_config = http_config;
         self.config = Some(server);
         self.last_error = None;
 
@@ -140,7 +153,8 @@ impl Runner {
     }
 
     /// Start the embedded rathole server if it isn't already running.
-    pub fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
+        self.http_proxy.apply(self.http_config.clone()).await?;
         if self.is_running() {
             return Ok(());
         }
@@ -190,11 +204,15 @@ impl Runner {
                 }
             }
         }
+        if let Err(e) = self.http_proxy.stop().await {
+            tracing::warn!("Pingora HTTP proxy stop failed: {e:#}");
+            self.last_error = Some(format!("{e:#}"));
+        }
     }
 
     pub async fn restart(&mut self) {
         self.stop().await;
-        if let Err(e) = self.start() {
+        if let Err(e) = self.start().await {
             self.last_error = Some(format!("{e:#}"));
         }
     }
@@ -218,6 +236,68 @@ fn service_config(service: RatholeService) -> ServerServiceConfig {
         bind_addr: service.bind_addr,
         token: mask(service.token),
         nodelay: service.nodelay,
+    }
+}
+
+fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConfig>> {
+    let Some(http) = &config.http else {
+        return Ok(None);
+    };
+    if !http.enabled {
+        return Ok(None);
+    }
+
+    let routes = config
+        .services
+        .iter()
+        .filter_map(|svc| {
+            let host = svc.http_host.as_ref()?.trim();
+            if host.is_empty() {
+                return None;
+            }
+            Some(HttpRoute {
+                host: host.to_ascii_lowercase(),
+                upstream_addr: visitor_addr_for_bind(&svc.bind_addr),
+                service: svc.name.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if routes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(AgentHttpProxyConfig {
+        bind_addr: http.bind_addr.clone(),
+        routes,
+    }))
+}
+
+fn visitor_addr_for_bind(bind_addr: &str) -> String {
+    let trimmed = bind_addr.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((host, port_part)) = rest.split_once("]:") {
+            let port = port_part.trim();
+            let host = match host {
+                "::" | "0:0:0:0:0:0:0:0" => "::1",
+                other => other,
+            };
+            return format!("[{host}]:{port}");
+        }
+    }
+
+    let Some((host, port)) = trimmed.rsplit_once(':') else {
+        return trimmed.to_string();
+    };
+    let host = match host {
+        "" | "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        other => other,
+    };
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 

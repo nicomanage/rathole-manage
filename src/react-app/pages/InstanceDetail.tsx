@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
 import {
+  DEFAULT_HTTP_BIND_ADDR,
   generateClientGlobalToml,
   generateClientServiceToml,
   normalizeConfig,
@@ -10,6 +11,7 @@ import {
 } from "@shared/config-generator";
 import type {
   AgentCommand,
+  HttpProxyConfig,
   InstanceView,
   RatholeConfig,
   RatholeService,
@@ -59,6 +61,7 @@ import {
   Tag,
   RefreshCw,
   Pencil,
+  Globe,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -379,6 +382,17 @@ function ConfigEditor({
     });
   }
 
+  function updateHttp(p: Partial<HttpProxyConfig>) {
+    setConfig((c) => ({
+      ...c,
+      http: {
+        enabled: c.http?.enabled ?? false,
+        bindAddr: c.http?.bindAddr ?? DEFAULT_HTTP_BIND_ADDR,
+        ...p,
+      },
+    }));
+  }
+
   function addService() {
     setConfig((c) => ({
       ...c,
@@ -493,6 +507,43 @@ function ConfigEditor({
       </Card>
 
       <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Globe className="h-4 w-4 text-muted-foreground" />
+            HTTP proxy
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">
+          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+            <div>
+              <Label>Pingora</Label>
+              {issueByPath.has("http.enabled") && (
+                <p className="mt-1 text-xs text-destructive">{issueByPath.get("http.enabled")}</p>
+              )}
+            </div>
+            <Switch
+              checked={!!config.http?.enabled}
+              disabled={!canEdit}
+              onCheckedChange={(enabled) => updateHttp({ enabled })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Bind address</Label>
+            <Input
+              aria-invalid={issueByPath.has("http.bindAddr")}
+              className={cn("font-mono", issueByPath.has("http.bindAddr") && "border-destructive")}
+              value={config.http?.bindAddr ?? DEFAULT_HTTP_BIND_ADDR}
+              disabled={!canEdit || !config.http?.enabled}
+              onChange={(e) => updateHttp({ bindAddr: e.target.value })}
+            />
+            {issueByPath.has("http.bindAddr") && (
+              <p className="text-xs text-destructive">{issueByPath.get("http.bindAddr")}</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Services ({config.services.length})</CardTitle>
           {canEdit && (
@@ -501,7 +552,7 @@ function ConfigEditor({
             </Button>
           )}
         </CardHeader>
-        <CardContent className="p-0">
+        <CardContent className="overflow-x-auto p-0">
           {config.services.length === 0 ? (
             <p className="px-6 pb-6 text-sm text-muted-foreground">
               No services. {canEdit ? "Add one to forward a port from behind NAT." : ""}
@@ -513,6 +564,7 @@ function ConfigEditor({
                   <TableHead className="w-16 text-center">Online</TableHead>
                   <TableHead className="min-w-32">Name</TableHead>
                   <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="min-w-40">HTTP host</TableHead>
                   <TableHead className="min-w-40">Public bind (server)</TableHead>
                   <TableHead className="min-w-36">Token</TableHead>
                   <TableHead className="w-20 text-center">nodelay</TableHead>
@@ -523,6 +575,7 @@ function ConfigEditor({
               <TableBody>
                 {config.services.map((svc, i) => {
                   const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
+                  const httpHostIssue = issueByPath.get(`services[${i}].httpHost`);
                   return (
                     <TableRow key={i} className="align-top">
                       <TableCell className="text-center">
@@ -550,6 +603,19 @@ function ConfigEditor({
                             <SelectItem value="udp">udp</SelectItem>
                           </SelectContent>
                         </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          aria-invalid={!!httpHostIssue}
+                          className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
+                          placeholder="app.example.com"
+                          value={svc.httpHost ?? ""}
+                          disabled={!canEdit || !config.http?.enabled}
+                          onChange={(e) => updateService(i, { httpHost: e.target.value })}
+                        />
+                        {httpHostIssue && (
+                          <p className="mt-1 text-xs text-destructive">{httpHostIssue}</p>
+                        )}
                       </TableCell>
                       <TableCell>
                         <Input
@@ -772,9 +838,9 @@ function AgentSetup({
         <CardContent className="space-y-4 text-sm">
           <p className="text-muted-foreground">
             The agent is a small Rust binary that depends on the <code className="font-mono">rathole</code>{" "}
-            crate and runs the server <span className="font-medium">in-process</span>. Nodes enroll
-            themselves via <code className="font-mono">rathole-agent login</code>; this instance was
-            created by that flow. Source is in <code className="font-mono">/agent</code>.
+            crate, embeds a Pingora HTTP proxy, and runs both <span className="font-medium">in-process</span>.
+            Nodes enroll themselves via <code className="font-mono">rathole-agent login</code>; this
+            instance was created by that flow. Source is in <code className="font-mono">/agent</code>.
           </p>
           <CodeBlock code={loginFlow} filename="enroll.sh" language="bash" />
           {canReveal && (
