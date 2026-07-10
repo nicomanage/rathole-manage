@@ -39,7 +39,7 @@ mod imp {
     use std::future::Future;
     use std::net::TcpListener;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::pin::Pin;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
     use std::sync::{Arc, RwLock};
@@ -527,7 +527,7 @@ mod imp {
         Ok(())
     }
 
-    fn path_to_str(path: &PathBuf) -> std::result::Result<&str, String> {
+    fn path_to_str(path: &Path) -> std::result::Result<&str, String> {
         path.to_str()
             .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
     }
