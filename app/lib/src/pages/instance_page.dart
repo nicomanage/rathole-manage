@@ -506,7 +506,11 @@ class _ConfigEditorState extends State<ConfigEditor> {
   void _setServiceType(int i, String type) {
     setState(() {
       final svc = _config.services[i];
-      final nextType = (_config.http?.enabled ?? false) ? type : 'tcp';
+      // http/https need the embedded proxy; tcp/udp are always selectable.
+      final nextType =
+          isHttpServiceType(type) && !(_config.http?.enabled ?? false)
+              ? 'tcp'
+              : type;
       final wasHttp = isHttpServiceType(svc.type);
       svc.type = nextType;
       if (!isHttpServiceType(nextType)) {

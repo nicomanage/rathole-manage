@@ -407,7 +407,8 @@ function ConfigEditor({
 
   function updateServiceType(i: number, type: ServiceType) {
     setConfig((c) => {
-      const nextType = c.http?.enabled ? type : "tcp";
+      // http/https need the embedded proxy; tcp/udp are always selectable.
+      const nextType = isHttpServiceType(type) && !c.http?.enabled ? "tcp" : type;
       const services = c.services.slice();
       const previous = services[i];
       services[i] = {
