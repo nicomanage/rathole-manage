@@ -24,7 +24,14 @@ rustup-init.exe
 
 # env & secrets
 .dev.vars
+.dev.vars.*
+.prod.vars
+.prod.vars.*
+!.dev.vars.example
+!.prod.vars.example
 .env
+.env.*
+!.env.example
 *.local
 
 # editor / os

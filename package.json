@@ -11,6 +11,8 @@
     "check": "tsc -b --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "test": "vitest run",
     "deploy": "npm run build && wrangler deploy",
+    "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "deploy:check": "node scripts/deploy-cloudflare.mjs --dry-run",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

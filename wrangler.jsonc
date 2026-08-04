@@ -2,14 +2,18 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "rathole-manage",
   "main": "src/worker/index.ts",
-  "compatibility_date": "2025-01-15",
+  "compatibility_date": "2026-07-13",
   "compatibility_flags": ["nodejs_compat"],
+  "secrets": {
+    "required": ["SESSION_SECRET"]
+  },
   "assets": {
     "not_found_handling": "single-page-application",
     "binding": "ASSETS"
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "head_sampling_rate": 1
   },
   "durable_objects": {
     "bindings": [

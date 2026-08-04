@@ -71,14 +71,30 @@ password you submit becomes the initial admin account.
 
 ## Deploy the panel
 
+For the fastest first deployment, authenticate Wrangler once and run the
+one-command deployment:
+
 ```bash
-npm run cf-typegen               # generate worker types (first time / after config changes)
-npx wrangler secret put SESSION_SECRET
-npm run deploy
+npx wrangler login               # only needed once per machine
+npm run deploy:cloudflare
 ```
 
+This command creates a git-ignored `.prod.vars` with a cryptographically secure
+`SESSION_SECRET` when needed, runs the test suite and production build, and
+uploads the Worker, static SPA, Durable Object migration, and secret together.
+Keep `.prod.vars` safe: later deployments reuse it so existing sessions remain
+valid. To validate the complete bundle without uploading it, run
+`npm run deploy:check`.
+
+For automated deployments, connect the repository under **Workers & Pages →
+Settings → Builds** and use `npm run build` as the build command and
+`npx wrangler deploy` as the deploy command. Add `SESSION_SECRET` once under the
+Worker's **Settings → Variables & Secrets**; build-time secrets are not runtime
+Worker secrets. The Worker name must remain `rathole-manage`, matching
+`wrangler.jsonc`.
+
 The Durable Object migration in `wrangler.jsonc` is applied automatically on
-first deploy.
+the first deployment. Run `npm run cf-typegen` after changing bindings.
 
 ## Connect a rathole node (Rust agent)
 
@@ -179,5 +195,7 @@ directly.
 | `npm run build` | typecheck + build the SPA and Worker |
 | `npm run check` | typecheck UI and Worker |
 | `npm run deploy` | build and `wrangler deploy` |
+| `npm run deploy:cloudflare` | test, build, securely provision the session secret, and deploy |
+| `npm run deploy:check` | perform the same validation and a Wrangler dry run without uploading |
 | `npm run cf-typegen` | regenerate `worker-configuration.d.ts` |
 | `cargo build --release` (in `agent/`) | build the Rust agent |

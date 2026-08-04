@@ -1,0 +1,4 @@
+# `npm run deploy:cloudflare` creates `.prod.vars` automatically when missing.
+# To manage the production secret yourself, copy this file to `.prod.vars` and
+# replace the value with at least 32 random characters. Never commit `.prod.vars`.
+SESSION_SECRET=replace-with-at-least-32-random-characters
