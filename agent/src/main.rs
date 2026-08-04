@@ -146,6 +146,22 @@ fn resolve_run_config() -> Result<RunConfig> {
     )
 }
 
+/// How often the agent reports status/metrics to the hub.
+///
+/// All agents share one hub Durable Object, which can only hibernate (and stop
+/// billing duration) while no agent is reporting, so reports must stay sparse.
+/// Override with STATUS_INTERVAL_SECS for a snappier panel at higher cost;
+/// values below 5s are ignored. The hub treats an agent as offline after three
+/// missed reports at this cadence.
+fn status_interval() -> Duration {
+    let secs = std::env::var("STATUS_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s >= 5)
+        .unwrap_or(60);
+    Duration::from_secs(secs)
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -224,7 +240,7 @@ async fn run_daemon() -> Result<()> {
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
-            let mut ticker = tokio::time::interval(Duration::from_secs(8));
+            let mut ticker = tokio::time::interval(status_interval());
             loop {
                 ticker.tick().await;
                 let mut guard = runner.lock().await;

@@ -44,7 +44,20 @@ interface Env {
   ASSETS: Fetcher;
 }
 
-const OFFLINE_AFTER_MS = 45_000;
+/** No status for this long ⇒ stale (3 missed reports at the agent's 60s cadence). */
+const OFFLINE_AFTER_MS = 180_000;
+/**
+ * Liveness alarm period. The alarm only runs while agent sockets are connected,
+ * and only catches half-open sockets — a clean disconnect is handled instantly
+ * by webSocketClose — so it can stay coarse. Every tick wakes the DO.
+ */
+const ALARM_PERIOD_MS = 120_000;
+/**
+ * Routine status reports (lastSeen, cpu/mem, traffic counters) are persisted at
+ * most this often per instance; material changes persist immediately. Keeps DO
+ * storage writes far below one per report.
+ */
+const PERSIST_MIN_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_SETTINGS: GlobalSettings = {
   defaultBindAddr: "0.0.0.0:2333",
   defaultTransport: "tcp",
@@ -52,6 +65,13 @@ const DEFAULT_SETTINGS: GlobalSettings = {
 const LOG_BUFFER_LIMIT = 300;
 
 type LogEntry = Extract<HubToBrowser, { type: "log" }>;
+
+/** Per-agent state that must survive DO hibernation without a storage write. */
+type AgentSocketAttachment = {
+  lastStatusAt?: number;
+  traffic?: Instance["traffic"];
+  monthlyTraffic?: Instance["monthlyTraffic"];
+};
 
 function desiredStateForCommand(command: AgentCommand): Instance["desiredProcessState"] | undefined {
   switch (command) {
@@ -72,12 +92,35 @@ function toView(inst: Instance): InstanceView {
   return { ...rest, agentTokenPreview: agentToken.slice(0, 4) + "…" };
 }
 
+/**
+ * Fingerprint of the state a status report may change that is worth persisting
+ * immediately. Anything else (lastSeen, cpu/mem, traffic counters) only reaches
+ * storage on the PERSIST_MIN_INTERVAL_MS schedule.
+ */
+function materialKey(inst: Instance): string {
+  return JSON.stringify([
+    inst.status,
+    inst.processState,
+    inst.serviceStatus
+      ? Object.entries(inst.serviceStatus).sort(([a], [b]) => a.localeCompare(b))
+      : null,
+    inst.metrics?.agentVersion ?? null,
+    inst.metrics?.ratholeVersion ?? null,
+    inst.metrics?.hostname ?? null,
+    inst.metrics?.configInSync ?? null,
+  ]);
+}
+
 export class RatholeHub extends DurableObject<Env> {
   private instances = new Map<string, Instance>();
   private users = new Map<string, User>();
   private logBuffers = new Map<string, LogEntry[]>();
   private settings: GlobalSettings = { ...DEFAULT_SETTINGS };
   private loaded = false;
+  /** In-memory liveness (not persisted); reseeded with a grace period after hibernation. */
+  private lastStatusAt = new Map<string, number>();
+  /** Last storage write per instance, for throttling routine status persists. */
+  private lastPersistAt = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -87,7 +130,10 @@ export class RatholeHub extends DurableObject<Env> {
         ctx.storage.get<GlobalSettings>("settings:global"),
         ctx.storage.list<User>({ prefix: "user:" }),
       ]);
-      for (const inst of stored.values()) this.instances.set(inst.id, inst);
+      for (const inst of stored.values()) {
+        this.instances.set(inst.id, inst);
+        this.lastPersistAt.set(inst.id, inst.updatedAt);
+      }
       for (const user of users.values()) this.users.set(user.id, user);
       if (settings) {
         this.settings = {
@@ -96,10 +142,26 @@ export class RatholeHub extends DurableObject<Env> {
           defaultHeartbeatInterval: settings.defaultHeartbeatInterval,
         };
       }
+      const wakeAt = Date.now();
+      for (const ws of ctx.getWebSockets()) {
+        const role = ctx.getTags(ws)[0] ?? "";
+        if (!role.startsWith("agent:")) continue;
+        const inst = this.instances.get(role.slice("agent:".length));
+        if (!inst) continue;
+        const attachment = this.agentAttachment(ws);
+        if (attachment?.lastStatusAt !== undefined) {
+          this.restoreAgentAttachment(inst, attachment);
+        } else {
+          // Existing sockets from before attachments were introduced get one
+          // grace window, recorded on the socket so it cannot reset each wake.
+          this.lastStatusAt.set(inst.id, wakeAt);
+          try { ws.serializeAttachment({ lastStatusAt: wakeAt } satisfies AgentSocketAttachment); } catch { /* ignore */ }
+        }
+      }
       this.loaded = true;
-      // Re-evaluate liveness periodically via alarm.
-      const alarm = await ctx.storage.getAlarm();
-      if (alarm === null) await ctx.storage.setAlarm(Date.now() + OFFLINE_AFTER_MS);
+      // Liveness is re-evaluated via alarm, but only while agents are connected —
+      // an idle DO must be able to sleep indefinitely.
+      if (this.hasAgentSockets()) await this.ensureAlarm();
     });
   }
 
@@ -108,7 +170,51 @@ export class RatholeHub extends DurableObject<Env> {
   private async persist(inst: Instance) {
     inst.updatedAt = Date.now();
     this.instances.set(inst.id, inst);
+    this.lastPersistAt.set(inst.id, inst.updatedAt);
     await this.ctx.storage.put(`instance:${inst.id}`, inst);
+  }
+
+  private hasAgentSockets(): boolean {
+    return this.ctx
+      .getWebSockets()
+      .some((ws) => (this.ctx.getTags(ws)[0] ?? "").startsWith("agent:"));
+  }
+
+  private async ensureAlarm() {
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null) await this.ctx.storage.setAlarm(Date.now() + ALARM_PERIOD_MS);
+  }
+
+  private agentAttachment(ws: WebSocket): AgentSocketAttachment | null {
+    return ws.deserializeAttachment() as AgentSocketAttachment | null;
+  }
+
+  private restoreAgentAttachment(inst: Instance, attachment: AgentSocketAttachment): void {
+    const seen = attachment.lastStatusAt;
+    if (seen === undefined || !Number.isFinite(seen)) return;
+    const knownSeen = this.lastStatusAt.get(inst.id) ?? 0;
+    if (seen > knownSeen) this.lastStatusAt.set(inst.id, seen);
+    if (seen <= (inst.lastSeen ?? 0)) return;
+    inst.lastSeen = seen;
+    if (attachment.traffic !== undefined) inst.traffic = attachment.traffic;
+    if (attachment.monthlyTraffic !== undefined) inst.monthlyTraffic = attachment.monthlyTraffic;
+  }
+
+  /** Mirror unpersisted traffic/liveness onto every socket so it survives hibernation. */
+  private attachAgentState(instanceId: string, inst: Instance, includeTraffic: boolean): boolean {
+    const attachment: AgentSocketAttachment = {
+      lastStatusAt: this.lastStatusAt.get(instanceId),
+      ...(includeTraffic ? { traffic: inst.traffic, monthlyTraffic: inst.monthlyTraffic } : {}),
+    };
+    try {
+      for (const ws of this.ctx.getWebSockets(`agent:${instanceId}`)) {
+        ws.serializeAttachment(attachment);
+      }
+      return true;
+    } catch {
+      // Attachments are size-limited. The caller falls back to a storage write.
+      return false;
+    }
   }
 
   private async remove(id: string) {
@@ -122,7 +228,14 @@ export class RatholeHub extends DurableObject<Env> {
   async listInstances(): Promise<InstanceView[]> {
     return [...this.instances.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map(toView);
+      .map((inst) => {
+        // Safety net for a stored "online" that never got closed out (e.g. the
+        // DO was evicted without a close event): present the truth, no write.
+        if (inst.status === "online" && this.ctx.getWebSockets(`agent:${inst.id}`).length === 0) {
+          return toView({ ...inst, status: "offline", processState: "unknown" });
+        }
+        return toView(inst);
+      });
   }
 
   async getInstance(id: string): Promise<Instance | undefined> {
@@ -292,10 +405,19 @@ export class RatholeHub extends DurableObject<Env> {
   }
 
   /** Upgrade an agent connection. `role` tag = agent:<instanceId>. */
-  private acceptAgent(instanceId: string): Response {
+  private async acceptAgent(instanceId: string): Promise<Response> {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server, [`agent:${instanceId}`]);
+    const now = Date.now();
+    this.lastStatusAt.set(instanceId, now);
+    const inst = this.instances.get(instanceId);
+    if (inst && !this.attachAgentState(instanceId, inst, true)) {
+      await this.persist(inst);
+      this.attachAgentState(instanceId, inst, false);
+    }
+    // Liveness checks run only while at least one agent is connected.
+    await this.ensureAlarm();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -333,7 +455,12 @@ export class RatholeHub extends DurableObject<Env> {
     if (role.startsWith("agent:")) {
       const id = role.slice("agent:".length);
       const inst = this.instances.get(id);
-      if (inst && this.ctx.getWebSockets(`agent:${id}`).length <= 1) {
+      if (inst) this.restoreAgentAttachment(inst, this.agentAttachment(ws) ?? {});
+      const anotherAgentSocket = this.ctx
+        .getWebSockets(`agent:${id}`)
+        .some((other) => other !== ws);
+      if (inst && !anotherAgentSocket) {
+        this.lastStatusAt.delete(id);
         inst.status = "offline";
         inst.processState = "unknown";
         inst.serviceStatus = undefined;
@@ -349,21 +476,34 @@ export class RatholeHub extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const now = Date.now();
-    for (const inst of this.instances.values()) {
-      const stale = !inst.lastSeen || now - inst.lastSeen > OFFLINE_AFTER_MS;
-      const connected = this.ctx.getWebSockets(`agent:${inst.id}`).length > 0;
-      const next: Instance["status"] = connected && !stale ? "online" : "offline";
-      if (next !== inst.status) {
-        inst.status = next;
-        if (next === "offline") {
-          inst.processState = "unknown";
-          inst.serviceStatus = undefined;
+    try {
+      for (const inst of this.instances.values()) {
+        const connected = this.ctx.getWebSockets(`agent:${inst.id}`).length > 0;
+        let seen = this.lastStatusAt.get(inst.id);
+        if (connected && seen === undefined) {
+          // Just woke from hibernation with a live socket: grant a grace period
+          // instead of trusting the (throttled, possibly old) persisted lastSeen.
+          seen = now;
+          this.lastStatusAt.set(inst.id, now);
+          this.attachAgentState(inst.id, inst, true);
         }
-        await this.persist(inst);
-        this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
+        const stale = seen === undefined || now - seen > OFFLINE_AFTER_MS;
+        const next: Instance["status"] = connected && !stale ? "online" : "offline";
+        if (next !== inst.status) {
+          inst.status = next;
+          if (next === "offline") {
+            inst.processState = "unknown";
+            inst.serviceStatus = undefined;
+          }
+          await this.persist(inst);
+          this.attachAgentState(inst.id, inst, false);
+          this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
+        }
       }
+    } finally {
+      // Keep checking only while agents are connected, even if this run failed.
+      if (this.hasAgentSockets()) await this.ctx.storage.setAlarm(Date.now() + ALARM_PERIOD_MS);
     }
-    await this.ctx.storage.setAlarm(now + OFFLINE_AFTER_MS);
   }
 
   // ---- message handling ---------------------------------------------------
@@ -383,9 +523,11 @@ export class RatholeHub extends DurableObject<Env> {
         }
         inst.status = "online";
         inst.lastSeen = Date.now();
+        this.lastStatusAt.set(instanceId, inst.lastSeen);
         inst.metrics = { ...inst.metrics, agentVersion: msg.agentVersion, hostname: msg.hostname };
         inst.desiredProcessState ??= "running";
         await this.persist(inst);
+        this.attachAgentState(instanceId, inst, false);
         this.pushLog({
           type: "log",
           instanceId,
@@ -398,17 +540,38 @@ export class RatholeHub extends DurableObject<Env> {
         break;
       }
       case "status": {
+        const now = Date.now();
+        const before = materialKey(inst);
         inst.status = "online";
-        inst.lastSeen = Date.now();
+        inst.lastSeen = now;
+        this.lastStatusAt.set(instanceId, now);
         inst.processState = msg.processState;
         if (msg.metrics) inst.metrics = { ...inst.metrics, ...msg.metrics };
-        if (msg.serviceStatus) inst.serviceStatus = msg.serviceStatus;
+        inst.serviceStatus = msg.serviceStatus;
         if (msg.traffic) {
           // Fold the delta into this month's total before overwriting the snapshot.
+          // The latest snapshot/accounting state is mirrored in the WebSocket
+          // attachment, so hibernation cannot make a later counter reset lose
+          // bytes that were already reported but not yet written to storage.
           accumulateMonthlyTraffic(inst, msg.traffic);
           inst.traffic = msg.traffic;
         }
-        await this.persist(inst);
+        // Persist material changes immediately; routine drift (lastSeen, cpu/mem,
+        // traffic counters) only every PERSIST_MIN_INTERVAL_MS per instance.
+        const lastPersist = this.lastPersistAt.get(instanceId) ?? 0;
+        let persisted = false;
+        if (materialKey(inst) !== before || now - lastPersist >= PERSIST_MIN_INTERVAL_MS) {
+          await this.persist(inst);
+          persisted = true;
+        } else {
+          this.instances.set(inst.id, inst);
+        }
+        if (!this.attachAgentState(instanceId, inst, !persisted)) {
+          // A large service set can exceed the attachment limit. Preserve exact
+          // accounting by writing this report instead of dropping the checkpoint.
+          if (!persisted) await this.persist(inst);
+          this.attachAgentState(instanceId, inst, false);
+        }
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
         break;
       }
@@ -437,6 +600,11 @@ export class RatholeHub extends DurableObject<Env> {
       }
       case "pong":
         inst.lastSeen = Date.now();
+        this.lastStatusAt.set(instanceId, inst.lastSeen);
+        if (!this.attachAgentState(instanceId, inst, true)) {
+          await this.persist(inst);
+          this.attachAgentState(instanceId, inst, false);
+        }
         break;
       case "command_result":
         this.pushLog({
