@@ -14,7 +14,10 @@ use rathole::config::{
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::http_proxy::{HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute};
+use crate::http_proxy::{
+    CustomCertificateConfig as AgentCustomCertificateConfig,
+    HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute,
+};
 use crate::protocol::{
     DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
     ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
@@ -303,10 +306,11 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    // HTTPS is a property of the HTTP proxy, not a rathole service type. When
+    // Let's Encrypt is enabled, provision every configured TCP HTTP route.
     let https_hosts = config
         .services
         .iter()
-        .filter(|svc| matches!(&svc.service_type, WireServiceType::Https))
         .flat_map(service_http_hosts)
         .collect::<Vec<_>>();
 
@@ -331,10 +335,24 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         })
         .transpose()?;
 
+    let custom_certificate = http
+        .custom_certificate
+        .as_ref()
+        .filter(|config| config.enabled)
+        .map(|config| AgentCustomCertificateConfig {
+            certificate_pem: config.certificate_pem.clone(),
+            private_key_pem: config.private_key_pem.clone(),
+        });
+    if lets_encrypt.is_some() && custom_certificate.is_some() {
+        anyhow::bail!("choose either Let's Encrypt or a custom certificate, not both");
+    }
+    let https_enabled = lets_encrypt.is_some() || custom_certificate.is_some();
+
     Ok(Some(AgentHttpProxyConfig {
         bind_addr: HTTP_PROXY_BIND_ADDR.into(),
-        https_bind_addr: lets_encrypt.as_ref().map(|_| HTTPS_PROXY_BIND_ADDR.into()),
+        https_bind_addr: https_enabled.then(|| HTTPS_PROXY_BIND_ADDR.into()),
         lets_encrypt,
+        custom_certificate,
         https_hosts,
         routes,
     }))
@@ -384,6 +402,7 @@ fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
 mod tests {
     use super::*;
     use crate::protocol::{
+        CustomCertificateConfig as WireCustomCertificateConfig,
         HttpProxyConfig as WireHttpProxyConfig, LetsEncryptConfig as WireLetsEncryptConfig,
         ServiceType as WireServiceType,
     };
@@ -406,6 +425,7 @@ mod tests {
                     email: email.into(),
                     staging: Some(false),
                 }),
+                custom_certificate: None,
             }),
             heartbeat_interval: None,
             services,
@@ -441,27 +461,51 @@ mod tests {
     }
 
     #[test]
-    fn ignores_lets_encrypt_without_https_routes() {
+    fn http_routes_use_the_tcp_service_bind() {
         let proxy = http_proxy_config(&config(
-            vec![service("web", WireServiceType::Http, "app.example.com")],
-            "",
+            vec![service("web", WireServiceType::Tcp, "app.example.com")],
+            "admin@example.com",
         ))
         .unwrap()
         .unwrap();
 
-        assert!(proxy.lets_encrypt.is_none());
-        assert!(proxy.https_bind_addr.is_none());
-        assert!(proxy.https_hosts.is_empty());
+        assert!(proxy.lets_encrypt.is_some());
+        assert_eq!(proxy.https_hosts, vec!["app.example.com".to_string()]);
         assert_eq!(proxy.routes.len(), 1);
-        assert_eq!(proxy.routes[0].upstream_addr, "memory://web");
+        assert_eq!(proxy.routes[0].upstream_addr, "0.0.0.0:8080");
     }
 
     #[test]
-    fn lets_encrypt_uses_only_https_route_hosts() {
+    fn custom_certificate_enables_https_for_tcp_routes() {
+        let mut config = config(
+            vec![service("web", WireServiceType::Tcp, "app.example.com")],
+            "admin@example.com",
+        );
+        let http = config.http.as_mut().unwrap();
+        http.lets_encrypt.as_mut().unwrap().enabled = false;
+        http.custom_certificate = Some(WireCustomCertificateConfig {
+            enabled: true,
+            certificate_pem: "certificate pem".into(),
+            private_key_pem: "private key pem".into(),
+        });
+
+        let proxy = http_proxy_config(&config).unwrap().unwrap();
+        assert!(proxy.lets_encrypt.is_none());
+        assert_eq!(
+            proxy.https_bind_addr.as_deref(),
+            Some(HTTPS_PROXY_BIND_ADDR)
+        );
+        let custom = proxy.custom_certificate.unwrap();
+        assert_eq!(custom.certificate_pem, "certificate pem");
+        assert_eq!(custom.private_key_pem, "private key pem");
+    }
+
+    #[test]
+    fn lets_encrypt_uses_all_tcp_http_route_hosts() {
         let proxy = http_proxy_config(&config(
             vec![
-                service("web", WireServiceType::Http, "app.example.com"),
-                service("secure", WireServiceType::Https, "secure.example.com"),
+                service("web", WireServiceType::Tcp, "app.example.com"),
+                service("secure", WireServiceType::Tcp, "secure.example.com"),
             ],
             "admin@example.com",
         ))
@@ -473,7 +517,13 @@ mod tests {
             proxy.https_bind_addr.as_deref(),
             Some(HTTPS_PROXY_BIND_ADDR)
         );
-        assert_eq!(proxy.https_hosts, vec!["secure.example.com".to_string()]);
+        assert_eq!(
+            proxy.https_hosts,
+            vec![
+                "app.example.com".to_string(),
+                "secure.example.com".to_string()
+            ]
+        );
         assert_eq!(proxy.routes.len(), 2);
         assert_eq!(
             proxy
@@ -481,7 +531,7 @@ mod tests {
                 .iter()
                 .map(|route| route.upstream_addr.as_str())
                 .collect::<Vec<_>>(),
-            vec!["memory://web", "memory://secure"]
+            vec!["0.0.0.0:8080", "0.0.0.0:8080"]
         );
     }
 
@@ -490,7 +540,7 @@ mod tests {
         let proxy = http_proxy_config(&config(
             vec![service_with_hosts(
                 "secure",
-                WireServiceType::Https,
+                WireServiceType::Tcp,
                 &["secure.example.com", "www.example.com"],
             )],
             "admin@example.com",
@@ -505,8 +555,8 @@ mod tests {
                 .map(|route| (route.host.as_str(), route.upstream_addr.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("secure.example.com", "memory://secure"),
-                ("www.example.com", "memory://secure"),
+                ("secure.example.com", "0.0.0.0:8080"),
+                ("www.example.com", "0.0.0.0:8080"),
             ]
         );
         assert_eq!(
@@ -519,11 +569,11 @@ mod tests {
     }
 
     #[test]
-    fn requires_lets_encrypt_email_only_for_https_routes() {
+    fn requires_lets_encrypt_email_for_tcp_http_routes() {
         let error = http_proxy_config(&config(
             vec![service(
                 "secure",
-                WireServiceType::Https,
+                WireServiceType::Tcp,
                 "secure.example.com",
             )],
             "",
@@ -534,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn server_config_uses_virtual_binds_for_http_services() {
+    fn server_config_preserves_tcp_binds_for_http_routes() {
         let mut tcp = service("ssh", WireServiceType::Tcp, "");
         tcp.bind_addr = "0.0.0.0:5202".into();
         tcp.http_host = None;
@@ -543,8 +593,8 @@ mod tests {
         let server = to_server_config(config(
             vec![
                 tcp,
-                service("web", WireServiceType::Http, "app.example.com"),
-                service("secure", WireServiceType::Https, "secure.example.com"),
+                service("web", WireServiceType::Tcp, "app.example.com"),
+                service("secure", WireServiceType::Tcp, "secure.example.com"),
             ],
             "admin@example.com",
         ))
@@ -556,11 +606,11 @@ mod tests {
         );
         assert_eq!(
             server.services.get("web").unwrap().bind_addr.as_str(),
-            "memory://web"
+            "0.0.0.0:8080"
         );
         assert_eq!(
             server.services.get("secure").unwrap().bind_addr.as_str(),
-            "memory://secure"
+            "0.0.0.0:8080"
         );
     }
 }

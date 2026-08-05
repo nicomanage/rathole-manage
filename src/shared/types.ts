@@ -2,6 +2,7 @@
 // Keep this file free of any runtime/platform imports so both sides can use it.
 
 export type TransportType = "tcp" | "tls" | "noise" | "websocket";
+/** `http`/`https` are accepted only to migrate configs written by older panels. */
 export type ServiceType = "tcp" | "udp" | "http" | "https";
 
 /** A single forwarded service inside a rathole server instance. */
@@ -9,13 +10,12 @@ export interface RatholeService {
   /** Service name, unique within an instance. Becomes the TOML table key. */
   name: string;
   type: ServiceType;
-  /** Public bind for TCP/UDP services; HTTP/HTTPS services use an internal memory:// key. */
+  /** Public bind for the TCP/UDP rathole service. */
   bindAddr: string;
   /**
    * Optional HTTP virtual hosts handled by the agent's embedded Pingora proxy.
-   * Required for services whose panel type is `http` or `https`.
-   * Requests for these Hosts are reverse-proxied into the service's in-memory
-   * rathole visitor stream.
+   * Only valid on TCP services. Requests for these Hosts are reverse-proxied
+   * to the service's TCP public bind address.
    */
   httpHosts?: string[];
   /** Legacy single-host field, migrated to `httpHosts` during normalization. */
@@ -34,6 +34,8 @@ export interface HttpProxyConfig {
   httpsBindAddr?: string;
   /** Optional Let's Encrypt automation for HTTPS virtual hosts. */
   letsEncrypt?: LetsEncryptConfig;
+  /** Optional operator-provided PEM certificate chain and private key. */
+  customCertificate?: CustomCertificateConfig;
 }
 
 export interface LetsEncryptConfig {
@@ -42,6 +44,12 @@ export interface LetsEncryptConfig {
   email: string;
   /** Use Let's Encrypt staging instead of production. */
   staging?: boolean;
+}
+
+export interface CustomCertificateConfig {
+  enabled: boolean;
+  certificatePem: string;
+  privateKeyPem: string;
 }
 
 export interface TlsConfig {

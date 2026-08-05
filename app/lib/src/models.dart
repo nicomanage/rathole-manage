@@ -108,17 +108,44 @@ class LetsEncryptConfig {
       {'enabled': enabled, 'email': email, 'staging': staging};
 }
 
+class CustomCertificateConfig {
+  bool enabled;
+  String certificatePem;
+  String privateKeyPem;
+
+  CustomCertificateConfig({
+    this.enabled = false,
+    this.certificatePem = '',
+    this.privateKeyPem = '',
+  });
+
+  factory CustomCertificateConfig.fromJson(Map<String, dynamic> json) =>
+      CustomCertificateConfig(
+        enabled: json['enabled'] as bool? ?? false,
+        certificatePem: json['certificatePem'] as String? ?? '',
+        privateKeyPem: json['privateKeyPem'] as String? ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'enabled': enabled,
+        'certificatePem': certificatePem,
+        'privateKeyPem': privateKeyPem,
+      };
+}
+
 class HttpProxyConfig {
   bool enabled;
   String bindAddr;
   String? httpsBindAddr;
   LetsEncryptConfig? letsEncrypt;
+  CustomCertificateConfig? customCertificate;
 
   HttpProxyConfig({
     this.enabled = false,
     this.bindAddr = '',
     this.httpsBindAddr,
     this.letsEncrypt,
+    this.customCertificate,
   });
 
   factory HttpProxyConfig.fromJson(Map<String, dynamic> json) => HttpProxyConfig(
@@ -128,6 +155,10 @@ class HttpProxyConfig {
         letsEncrypt: json['letsEncrypt'] == null
             ? null
             : LetsEncryptConfig.fromJson(json['letsEncrypt'] as Map<String, dynamic>),
+        customCertificate: json['customCertificate'] == null
+            ? null
+            : CustomCertificateConfig.fromJson(
+                json['customCertificate'] as Map<String, dynamic>),
       );
 
   Map<String, dynamic> toJson() => {
@@ -135,6 +166,8 @@ class HttpProxyConfig {
         'bindAddr': bindAddr,
         if (httpsBindAddr != null) 'httpsBindAddr': httpsBindAddr,
         if (letsEncrypt != null) 'letsEncrypt': letsEncrypt!.toJson(),
+        if (customCertificate != null)
+          'customCertificate': customCertificate!.toJson(),
       };
 }
 

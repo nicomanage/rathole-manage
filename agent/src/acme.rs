@@ -54,9 +54,14 @@ mod imp {
         Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
     };
     use openssl::asn1::Asn1Time;
+    use openssl::pkey::PKey;
     use openssl::x509::X509;
     use std::cmp::Ordering;
-    use std::fs;
+    use std::collections::hash_map::DefaultHasher;
+    use std::fs::{self, OpenOptions};
+    use std::hash::{Hash, Hasher};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -303,6 +308,41 @@ mod imp {
         Ok(normalized)
     }
 
+    pub(crate) fn store_custom_certificate(
+        certificate_pem: &str,
+        private_key_pem: &str,
+    ) -> Result<CertificatePaths> {
+        let certificates = X509::stack_from_pem(certificate_pem.as_bytes())
+            .context("parsing custom certificate PEM")?;
+        let certificate = certificates
+            .first()
+            .context("custom certificate PEM contains no certificates")?;
+        let private_key = PKey::private_key_from_pem(private_key_pem.as_bytes())
+            .context("parsing custom private key PEM")?;
+        let public_key = certificate
+            .public_key()
+            .context("reading custom certificate public key")?;
+        if !public_key.public_eq(&private_key) {
+            bail!("custom certificate does not match its private key");
+        }
+
+        let mut hasher = DefaultHasher::new();
+        certificate_pem.hash(&mut hasher);
+        private_key_pem.hash(&mut hasher);
+        let cert_dir = default_storage_dir()
+            .join("custom")
+            .join(format!("{:016x}", hasher.finish()));
+        let paths = CertificatePaths {
+            cert_path: cert_dir.join("fullchain.pem"),
+            key_path: cert_dir.join("key.pem"),
+        };
+        write_atomic(&paths.cert_path, certificate_pem.as_bytes())
+            .with_context(|| format!("writing {}", paths.cert_path.display()))?;
+        write_secret_atomic(&paths.key_path, private_key_pem.as_bytes())
+            .with_context(|| format!("writing {}", paths.key_path.display()))?;
+        Ok(paths)
+    }
+
     fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -316,7 +356,23 @@ mod imp {
     }
 
     fn write_secret_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-        write_atomic(path, bytes)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        let tmp = path.with_extension("tmp");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        drop(file);
+        fs::rename(&tmp, path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting permissions on {}", path.display()))?;
         Ok(())
@@ -364,4 +420,4 @@ mod imp {
 }
 
 #[cfg(unix)]
-pub(crate) use imp::AcmeIssuer;
+pub(crate) use imp::{store_custom_certificate, AcmeIssuer};

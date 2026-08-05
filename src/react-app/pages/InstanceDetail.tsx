@@ -6,7 +6,6 @@ import {
   generateClientGlobalToml,
   generateClientServiceToml,
   HTTP_PROXY_BIND_ADDR,
-  HTTP_SERVICE_BIND_ADDR_PREFIX,
   HTTPS_PROXY_BIND_ADDR,
   normalizeConfig,
   parseHttpHostsInput,
@@ -25,6 +24,7 @@ import type {
 } from "@shared/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -73,23 +73,6 @@ import { toast } from "sonner";
 
 const TRANSPORTS: TransportType[] = ["tcp", "tls", "noise", "websocket"];
 const BASIC_SERVICE_TYPES: ServiceType[] = ["tcp", "udp"];
-const HTTP_SERVICE_TYPES: ServiceType[] = ["tcp", "udp", "http", "https"];
-
-function isHttpServiceType(type: ServiceType): boolean {
-  return type === "http" || type === "https";
-}
-
-function defaultPublicBindAddr(i: number): string {
-  return `0.0.0.0:${5000 + i}`;
-}
-
-function restorePublicBindAddr(service: RatholeService, i: number): string {
-  const bindAddr = service.bindAddr.trim();
-  if (!bindAddr || bindAddr.startsWith(HTTP_SERVICE_BIND_ADDR_PREFIX)) {
-    return defaultPublicBindAddr(i);
-  }
-  return service.bindAddr;
-}
 
 export function InstanceDetail() {
   const { id = "" } = useParams();
@@ -206,6 +189,7 @@ export function InstanceDetail() {
       <Tabs defaultValue="config">
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
+          <TabsTrigger value="http">HTTP</TabsTrigger>
           <TabsTrigger value="services">Services</TabsTrigger>
           <TabsTrigger value="client">Client config</TabsTrigger>
           <TabsTrigger value="traffic">Traffic</TabsTrigger>
@@ -407,20 +391,12 @@ function ConfigEditor({
 
   function updateServiceType(i: number, type: ServiceType) {
     setConfig((c) => {
-      // http/https need the embedded proxy; tcp/udp are always selectable.
-      const nextType = isHttpServiceType(type) && !c.http?.enabled ? "tcp" : type;
       const services = c.services.slice();
       const previous = services[i];
       services[i] = {
         ...previous,
-        type: nextType,
-        ...(isHttpServiceType(nextType)
-          ? {}
-          : {
-              httpHost: undefined,
-              httpHosts: undefined,
-              bindAddr: isHttpServiceType(previous.type) ? restorePublicBindAddr(previous, i) : previous.bindAddr,
-            }),
+        type,
+        ...(type === "udp" ? { httpHost: undefined, httpHosts: undefined } : {}),
       };
       return normalizeConfig({ ...c, services });
     });
@@ -430,25 +406,16 @@ function ConfigEditor({
     setConfig((c) => {
       const { bindAddr: _bindAddr, httpsBindAddr: _httpsBindAddr, ...rest } = p;
       const enabled = rest.enabled ?? c.http?.enabled ?? false;
-      const services = enabled
-        ? c.services
-        : c.services.map((service, idx) =>
-            isHttpServiceType(service.type)
-              ? {
-                  ...service,
-                  type: "tcp" as const,
-                  bindAddr: restorePublicBindAddr(service, idx),
-                  httpHost: undefined,
-                  httpHosts: undefined,
-                }
-              : service,
-          );
       return {
         ...c,
-        services,
         http: {
           enabled,
           letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
+          customCertificate: c.http?.customCertificate ?? {
+            enabled: false,
+            certificatePem: "",
+            privateKeyPem: "",
+          },
           ...rest,
           bindAddr: HTTP_PROXY_BIND_ADDR,
           httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
@@ -470,6 +437,42 @@ function ConfigEditor({
           bindAddr: HTTP_PROXY_BIND_ADDR,
           httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
           letsEncrypt: next,
+          customCertificate: next.enabled
+            ? {
+                enabled: false,
+                certificatePem: c.http?.customCertificate?.certificatePem ?? "",
+                privateKeyPem: c.http?.customCertificate?.privateKeyPem ?? "",
+              }
+            : c.http?.customCertificate,
+        },
+      };
+    });
+  }
+
+  function updateCustomCertificate(
+    p: Partial<NonNullable<HttpProxyConfig["customCertificate"]>>,
+  ) {
+    setConfig((c) => {
+      const current = c.http?.customCertificate ?? {
+        enabled: false,
+        certificatePem: "",
+        privateKeyPem: "",
+      };
+      const next = { ...current, ...p };
+      return {
+        ...c,
+        http: {
+          enabled: next.enabled ? true : (c.http?.enabled ?? false),
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: next.enabled
+            ? {
+                enabled: false,
+                email: c.http?.letsEncrypt?.email ?? "",
+                staging: c.http?.letsEncrypt?.staging ?? false,
+              }
+            : c.http?.letsEncrypt,
+          customCertificate: next,
         },
       };
     });
@@ -514,8 +517,10 @@ function ConfigEditor({
     return serviceStatus[name] ? "online" : "offline";
   }
 
-  const serviceTypes = config.http?.enabled ? HTTP_SERVICE_TYPES : BASIC_SERVICE_TYPES;
-  const showPublicBindColumn = config.services.some((svc) => !isHttpServiceType(svc.type));
+  const services = config.services.map((service, index) => ({ service, index }));
+  const tcpBackends = config.services
+    .map((service, index) => ({ service, index }))
+    .filter(({ service }) => service.type === "tcp");
 
   const validationPanel =
     issues.length > 0 ? (
@@ -540,6 +545,186 @@ function ConfigEditor({
       </Button>
     </div>
   ) : null;
+
+  function serviceTable(
+    entries: Array<{ service: RatholeService; index: number }>,
+    httpPanel: boolean,
+  ) {
+    return (
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-base">
+            {httpPanel ? "TCP backends" : "TCP/UDP services"} ({entries.length})
+          </CardTitle>
+          {canEdit && !httpPanel && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={addService}
+            >
+              <Plus className="h-4 w-4" /> Add service
+            </Button>
+          )}
+        </CardHeader>
+        <CardContent className="overflow-x-auto p-0">
+          {entries.length === 0 ? (
+            <p className="px-6 pb-6 text-sm text-muted-foreground">
+              {httpPanel
+                ? "No TCP services. Add one in the Services tab before assigning HTTP hosts."
+                : "No TCP/UDP services. Add one to forward a port from behind NAT."}
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16 text-center">Online</TableHead>
+                  <TableHead className="min-w-32">Name</TableHead>
+                  <TableHead className={httpPanel ? "min-w-40" : "w-24"}>
+                    {httpPanel ? "TCP bind" : "Type"}
+                  </TableHead>
+                  {httpPanel ? (
+                    <TableHead className="min-w-52">HTTP hosts</TableHead>
+                  ) : (
+                    <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  )}
+                  {!httpPanel && (
+                    <>
+                      <TableHead className="min-w-36">Token</TableHead>
+                      <TableHead className="w-20 text-center">nodelay</TableHead>
+                    </>
+                  )}
+                  <TableHead className="w-28 text-right">Traffic</TableHead>
+                  {canEdit && !httpPanel && <TableHead className="w-12" />}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {entries.map(({ service: svc, index: i }) => {
+                  const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
+                  const httpHostIssue =
+                    issueByPath.get(`services[${i}].httpHosts`) ??
+                    issueByPath.get(`services[${i}].httpHost`);
+                  return (
+                    <TableRow key={i} className="align-top">
+                      <TableCell className="text-center">
+                        <ServiceStatusDot state={serviceState(svc.name)} />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
+                          value={svc.name}
+                          disabled={!canEdit || httpPanel}
+                          onChange={(e) => updateService(i, { name: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {httpPanel ? (
+                          <span className="font-mono text-sm">{svc.bindAddr}</span>
+                        ) : (
+                          <Select
+                            value={svc.type}
+                            disabled={!canEdit}
+                            onValueChange={(v) => updateServiceType(i, v as ServiceType)}
+                          >
+                            <SelectTrigger className="h-8">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {BASIC_SERVICE_TYPES.map((type) => (
+                                <SelectItem key={type} value={type}>
+                                  {type}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {httpPanel ? (
+                          <>
+                            <Input
+                              aria-invalid={!!httpHostIssue}
+                              className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
+                              placeholder="app.example.com, www.example.com"
+                              value={serviceHttpHosts(svc).join(", ")}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                updateService(i, {
+                                  httpHost: undefined,
+                                  httpHosts: parseHttpHostsInput(e.target.value),
+                                })
+                              }
+                            />
+                            {httpHostIssue && (
+                              <p className="mt-1 text-xs text-destructive">{httpHostIssue}</p>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <Input
+                              aria-invalid={!!publicBindIssue}
+                              className={cn("h-8 font-mono", publicBindIssue && "border-destructive")}
+                              value={svc.bindAddr}
+                              disabled={!canEdit}
+                              onChange={(e) => updateService(i, { bindAddr: e.target.value })}
+                            />
+                            {publicBindIssue && (
+                              <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
+                            )}
+                          </>
+                        )}
+                      </TableCell>
+                      {!httpPanel && (
+                        <>
+                          <TableCell>
+                            <Input
+                              className="h-8 font-mono"
+                              placeholder="inherits default"
+                              value={svc.token ?? ""}
+                              disabled={!canEdit}
+                              onChange={(e) => updateService(i, { token: e.target.value })}
+                            />
+                          </TableCell>
+                          <TableCell className="text-center">
+                            <Switch
+                              checked={!!svc.nodelay}
+                              disabled={!canEdit}
+                              onCheckedChange={(v) => updateService(i, { nodelay: v })}
+                            />
+                          </TableCell>
+                        </>
+                      )}
+                      <TableCell className="pt-3 text-right font-mono text-xs whitespace-nowrap">
+                        <span className="text-success" title="Downloaded by visitors">
+                          ↓ {formatBytes(traffic?.[svc.name]?.bytesOut)}
+                        </span>
+                        <br />
+                        <span className="text-muted-foreground" title="Uploaded by visitors">
+                          ↑ {formatBytes(traffic?.[svc.name]?.bytesIn)}
+                        </span>
+                      </TableCell>
+                      {canEdit && !httpPanel && (
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:text-destructive"
+                            title="Remove service"
+                            onClick={() => removeService(i)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <>
@@ -617,53 +802,122 @@ function ConfigEditor({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Globe className="h-4 w-4 text-muted-foreground" />
-            HTTP service
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-            <div>
-              <Label>Pingora</Label>
-              {issueByPath.has("http.enabled") && (
-                <p className="mt-1 text-xs text-destructive">{issueByPath.get("http.enabled")}</p>
-              )}
-            </div>
-            <Switch
-              checked={!!config.http?.enabled}
-              disabled={!canEdit}
-              onCheckedChange={(enabled) => updateHttp({ enabled })}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-            <div>
-              <Label className="flex items-center gap-2">
-                <LockKeyhole className="h-4 w-4 text-muted-foreground" />
-                Let's Encrypt
-              </Label>
-            </div>
-            <Switch
-              checked={!!config.http?.letsEncrypt?.enabled}
-              disabled={!canEdit}
-              onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>ACME email</Label>
-            <Input
-              className="font-mono"
-              placeholder="admin@example.com"
-              value={config.http?.letsEncrypt?.email ?? ""}
-              disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
-              onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
-            />
-          </div>
-        </CardContent>
-      </Card>
+          {validationPanel}
+          {saveBar}
+        </div>
+      </TabsContent>
 
+      <TabsContent value="http">
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Globe className="h-4 w-4 text-muted-foreground" />
+                HTTP proxy
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2">
+              <p className="text-sm text-muted-foreground sm:col-span-2">
+                HTTP host routing is layered on existing TCP services. Create and manage the TCP
+                listener in Services, then assign its hostnames below.
+              </p>
+              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                <div>
+                  <Label>Pingora</Label>
+                  {issueByPath.has("http.enabled") && (
+                    <p className="mt-1 text-xs text-destructive">
+                      {issueByPath.get("http.enabled")}
+                    </p>
+                  )}
+                </div>
+                <Switch
+                  checked={!!config.http?.enabled}
+                  disabled={!canEdit}
+                  onCheckedChange={(enabled) => updateHttp({ enabled })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                <div>
+                  <Label className="flex items-center gap-2">
+                    <LockKeyhole className="h-4 w-4 text-muted-foreground" />
+                    Let's Encrypt
+                  </Label>
+                </div>
+                <Switch
+                  checked={!!config.http?.letsEncrypt?.enabled}
+                  disabled={!canEdit}
+                  onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                <div>
+                  <Label>Custom certificate</Label>
+                  {issueByPath.has("http.customCertificate.enabled") && (
+                    <p className="mt-1 text-xs text-destructive">
+                      {issueByPath.get("http.customCertificate.enabled")}
+                    </p>
+                  )}
+                </div>
+                <Switch
+                  checked={!!config.http?.customCertificate?.enabled}
+                  disabled={!canEdit}
+                  onCheckedChange={(enabled) => updateCustomCertificate({ enabled })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>ACME email</Label>
+                <Input
+                  className="font-mono"
+                  placeholder="admin@example.com"
+                  value={config.http?.letsEncrypt?.email ?? ""}
+                  disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
+                  onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2 sm:col-span-2">
+                <Label>Certificate chain (PEM)</Label>
+                <Textarea
+                  aria-invalid={issueByPath.has("http.customCertificate.certificatePem")}
+                  className={cn(
+                    "min-h-40 font-mono text-xs",
+                    issueByPath.has("http.customCertificate.certificatePem") &&
+                      "border-destructive",
+                  )}
+                  placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                  value={config.http?.customCertificate?.certificatePem ?? ""}
+                  disabled={!canEdit || !config.http?.customCertificate?.enabled}
+                  onChange={(e) => updateCustomCertificate({ certificatePem: e.target.value })}
+                />
+                {issueByPath.has("http.customCertificate.certificatePem") && (
+                  <p className="text-xs text-destructive">
+                    {issueByPath.get("http.customCertificate.certificatePem")}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2 sm:col-span-2">
+                <Label>Private key (PEM)</Label>
+                <Textarea
+                  aria-invalid={issueByPath.has("http.customCertificate.privateKeyPem")}
+                  className={cn(
+                    "min-h-40 font-mono text-xs",
+                    issueByPath.has("http.customCertificate.privateKeyPem") &&
+                      "border-destructive",
+                  )}
+                  placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                  value={config.http?.customCertificate?.privateKeyPem ?? ""}
+                  disabled={!canEdit || !config.http?.customCertificate?.enabled}
+                  onChange={(e) => updateCustomCertificate({ privateKeyPem: e.target.value })}
+                />
+                {issueByPath.has("http.customCertificate.privateKeyPem") && (
+                  <p className="text-xs text-destructive">
+                    {issueByPath.get("http.customCertificate.privateKeyPem")}
+                  </p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {serviceTable(tcpBackends, true)}
           {validationPanel}
           {saveBar}
         </div>
@@ -671,157 +925,7 @@ function ConfigEditor({
 
       <TabsContent value="services">
         <div className="space-y-6">
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">Services ({config.services.length})</CardTitle>
-          {canEdit && (
-            <Button variant="outline" size="sm" onClick={addService}>
-              <Plus className="h-4 w-4" /> Add service
-            </Button>
-          )}
-        </CardHeader>
-        <CardContent className="overflow-x-auto p-0">
-          {config.services.length === 0 ? (
-            <p className="px-6 pb-6 text-sm text-muted-foreground">
-              No services. {canEdit ? "Add one to forward a port from behind NAT." : ""}
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-16 text-center">Online</TableHead>
-                  <TableHead className="min-w-32">Name</TableHead>
-                  <TableHead className="w-24">Type</TableHead>
-                  <TableHead className="min-w-40">HTTP hosts</TableHead>
-                  {showPublicBindColumn && (
-                    <TableHead className="min-w-40">Public bind (server)</TableHead>
-                  )}
-                  <TableHead className="min-w-36">Token</TableHead>
-                  <TableHead className="w-20 text-center">nodelay</TableHead>
-                  <TableHead className="w-28 text-right">Traffic</TableHead>
-                  {canEdit && <TableHead className="w-12" />}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {config.services.map((svc, i) => {
-                  const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
-                  const httpHostIssue =
-                    issueByPath.get(`services[${i}].httpHosts`) ??
-                    issueByPath.get(`services[${i}].httpHost`);
-                  return (
-                    <TableRow key={i} className="align-top">
-                      <TableCell className="text-center">
-                        <ServiceStatusDot state={serviceState(svc.name)} />
-                      </TableCell>
-                      <TableCell>
-                        <Input
-                          className="h-8 font-mono"
-                          value={svc.name}
-                          disabled={!canEdit}
-                          onChange={(e) => updateService(i, { name: e.target.value })}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Select
-                          value={svc.type}
-                          disabled={!canEdit}
-                          onValueChange={(v) => updateServiceType(i, v as ServiceType)}
-                        >
-                          <SelectTrigger className="h-8">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {serviceTypes.map((type) => (
-                              <SelectItem key={type} value={type}>
-                                {type}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </TableCell>
-                      <TableCell>
-                        <Input
-                          aria-invalid={!!httpHostIssue}
-                          className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
-                          placeholder="app.example.com, www.example.com"
-                          value={serviceHttpHosts(svc).join(", ")}
-                          disabled={!canEdit || (svc.type !== "http" && svc.type !== "https")}
-                          onChange={(e) =>
-                            updateService(i, {
-                              httpHost: undefined,
-                              httpHosts: parseHttpHostsInput(e.target.value),
-                            })
-                          }
-                        />
-                        {httpHostIssue && (
-                          <p className="mt-1 text-xs text-destructive">{httpHostIssue}</p>
-                        )}
-                      </TableCell>
-                      {showPublicBindColumn && (
-                        <TableCell>
-                          {!isHttpServiceType(svc.type) && (
-                            <>
-                              <Input
-                                aria-invalid={!!publicBindIssue}
-                                className={cn("h-8 font-mono", publicBindIssue && "border-destructive")}
-                                value={svc.bindAddr}
-                                disabled={!canEdit}
-                                onChange={(e) => updateService(i, { bindAddr: e.target.value })}
-                              />
-                              {publicBindIssue && (
-                                <p className="mt-1 text-xs text-destructive">{publicBindIssue}</p>
-                              )}
-                            </>
-                          )}
-                        </TableCell>
-                      )}
-                      <TableCell>
-                        <Input
-                          className="h-8 font-mono"
-                          placeholder="inherits default"
-                          value={svc.token ?? ""}
-                          disabled={!canEdit}
-                          onChange={(e) => updateService(i, { token: e.target.value })}
-                        />
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <Switch
-                          checked={!!svc.nodelay}
-                          disabled={!canEdit}
-                          onCheckedChange={(v) => updateService(i, { nodelay: v })}
-                        />
-                      </TableCell>
-                      <TableCell className="pt-3 text-right font-mono text-xs whitespace-nowrap">
-                        <span className="text-success" title="Downloaded by visitors">
-                          ↓ {formatBytes(traffic?.[svc.name]?.bytesOut)}
-                        </span>
-                        <br />
-                        <span className="text-muted-foreground" title="Uploaded by visitors">
-                          ↑ {formatBytes(traffic?.[svc.name]?.bytesIn)}
-                        </span>
-                      </TableCell>
-                      {canEdit && (
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-destructive hover:text-destructive"
-                            title="Remove service"
-                            onClick={() => removeService(i)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
-
+          {serviceTable(services, false)}
           {validationPanel}
           {saveBar}
         </div>

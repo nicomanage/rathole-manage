@@ -20,19 +20,7 @@ function isHttpService(svc: RatholeService): boolean {
 }
 
 function hasHttpRoute(svc: RatholeService): boolean {
-  return isHttpService(svc) || serviceHttpHosts(svc).length > 0;
-}
-
-function hasHttpsRoute(svc: RatholeService): boolean {
-  return svc.type === "https" && serviceHttpHosts(svc).length > 0;
-}
-
-function assignHttpServiceBindAddrs(services: RatholeService[]): RatholeService[] {
-  return services.map((service, i) => {
-    if (!isHttpService(service)) return service;
-    const key = service.name.trim() || `service_${i + 1}`;
-    return { ...service, bindAddr: `${HTTP_SERVICE_BIND_ADDR_PREFIX}${key}` };
-  });
+  return serviceHttpHosts(svc).length > 0;
 }
 
 function defaultPublicBindAddr(i: number): string {
@@ -81,28 +69,19 @@ export function serviceHttpHosts(service: RatholeService): string[] {
 export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
-  const httpEnabled = !!config.http?.enabled;
   const services = legacyServices.map(({ domain: _domain, ...service }, i) => {
-    const httpHosts = httpEnabled ? serviceHttpHosts(service) : [];
-    const serviceType =
-      !httpEnabled && isHttpService(service)
-        ? "tcp"
-        : httpHosts.length > 0 && service.type === "tcp"
-          ? "http"
-          : service.type;
-    const bindAddr =
-      serviceType === "tcp" && isHttpService(service)
-        ? restorePublicBindAddr(service, i)
-        : service.bindAddr;
+    const httpHosts = serviceHttpHosts(service);
+    const legacyHttpService = isHttpService(service);
     return {
       ...service,
-      type: serviceType,
-      bindAddr,
+      // HTTP routing is an overlay on a real TCP service. Migrate the former
+      // panel-only http/https service markers back to their rathole type.
+      type: legacyHttpService ? ("tcp" as const) : service.type,
+      bindAddr: legacyHttpService ? restorePublicBindAddr(service, i) : service.bindAddr,
       httpHost: undefined,
       httpHosts: httpHosts.length > 0 ? httpHosts : undefined,
     };
   });
-  const normalizedServices = assignHttpServiceBindAddrs(services);
 
   return {
     ...config,
@@ -119,9 +98,16 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
                 staging: !!config.http.letsEncrypt.staging,
               }
             : undefined,
+          customCertificate: config.http.customCertificate
+            ? {
+                enabled: !!config.http.customCertificate.enabled,
+                certificatePem: config.http.customCertificate.certificatePem?.trim() || "",
+                privateKeyPem: config.http.customCertificate.privateKeyPem?.trim() || "",
+              }
+            : undefined,
         }
       : undefined,
-    services: normalizedServices,
+    services,
   };
 }
 
@@ -226,8 +212,10 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
 
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
+  const customCertificateEnabled = !!config.http?.customCertificate?.enabled;
   const httpRoutes = config.services.filter(hasHttpRoute);
-  const letsEncryptActive = letsEncryptEnabled && config.services.some(hasHttpsRoute);
+  const letsEncryptActive = letsEncryptEnabled && httpRoutes.length > 0;
+  const customCertificateActive = customCertificateEnabled && httpRoutes.length > 0;
   if (httpEnabled || httpRoutes.length > 0) {
     const httpBindAddr = config.http?.bindAddr?.trim() || HTTP_PROXY_BIND_ADDR;
     if (httpBindAddr !== HTTP_PROXY_BIND_ADDR) {
@@ -237,13 +225,29 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
       });
     }
   }
-  if (!httpEnabled && httpRoutes.length > 0) {
+  if (letsEncryptEnabled && customCertificateEnabled) {
     issues.push({
-      path: "http.enabled",
-      message: "Enable the HTTP proxy before assigning HTTP hosts.",
+      path: "http.customCertificate.enabled",
+      message: "Choose either Let's Encrypt or a custom certificate, not both.",
     });
   }
-  if (letsEncryptActive) {
+  if (customCertificateEnabled) {
+    const certificatePem = config.http?.customCertificate?.certificatePem?.trim() || "";
+    const privateKeyPem = config.http?.customCertificate?.privateKeyPem?.trim() || "";
+    if (!certificatePem.includes("-----BEGIN CERTIFICATE-----")) {
+      issues.push({
+        path: "http.customCertificate.certificatePem",
+        message: "Custom certificate must contain a PEM certificate chain.",
+      });
+    }
+    if (!/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(privateKeyPem)) {
+      issues.push({
+        path: "http.customCertificate.privateKeyPem",
+        message: "Custom certificate must contain a PEM private key.",
+      });
+    }
+  }
+  if (letsEncryptActive || customCertificateActive) {
     const httpsBindAddr = config.http?.httpsBindAddr?.trim() || HTTPS_PROXY_BIND_ADDR;
     if (httpsBindAddr !== HTTPS_PROXY_BIND_ADDR) {
       issues.push({
@@ -264,34 +268,20 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
     seen.add(svc.name);
 
-    if (!isHttpService(svc)) {
-      const publicBindError = validateHostPort(svc.bindAddr, "[::]:5000");
-      if (publicBindError) {
-        issues.push({
-          path: `${base}.bindAddr`,
-          message: `Service "${svc.name || i}" public bind address ${publicBindError}`,
-        });
-      }
+    const publicBindError = validateHostPort(svc.bindAddr, "[::]:5000");
+    if (publicBindError) {
+      issues.push({
+        path: `${base}.bindAddr`,
+        message: `Service "${svc.name || i}" public bind address ${publicBindError}`,
+      });
     }
 
     const httpHosts = serviceHttpHosts(svc);
-    if (isHttpService(svc) && httpHosts.length === 0) {
-      issues.push({
-        path: `${base}.httpHosts`,
-        message: `Service "${svc.name || i}" needs at least one HTTP host.`,
-      });
-    }
     if (httpHosts.length > 0) {
       if (svc.type === "udp") {
         issues.push({
           path: `${base}.httpHosts`,
           message: `Service "${svc.name || i}" cannot be UDP and receive HTTP proxy traffic.`,
-        });
-      }
-      if (svc.type === "tcp") {
-        issues.push({
-          path: `${base}.httpHosts`,
-          message: `Service "${svc.name || i}" must be HTTP or HTTPS to use an HTTP host.`,
         });
       }
       httpHosts.forEach((httpHost, hostIndex) => {
@@ -340,6 +330,11 @@ export function defaultConfig(): RatholeConfig {
         enabled: false,
         email: "",
         staging: false,
+      },
+      customCertificate: {
+        enabled: false,
+        certificatePem: "",
+        privateKeyPem: "",
       },
     },
     services: [],

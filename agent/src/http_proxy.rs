@@ -8,10 +8,17 @@ pub struct HttpRoute {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCertificateConfig {
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpProxyConfig {
     pub bind_addr: String,
     pub https_bind_addr: Option<String>,
     pub lets_encrypt: Option<LetsEncryptConfig>,
+    pub custom_certificate: Option<CustomCertificateConfig>,
     pub https_hosts: Vec<String>,
     pub routes: Vec<HttpRoute>,
 }
@@ -19,7 +26,7 @@ pub struct HttpProxyConfig {
 #[cfg(unix)]
 mod imp {
     use super::{HttpProxyConfig, HttpRoute};
-    use crate::acme::{AcmeIssuer, CertificatePaths, ChallengeStore};
+    use crate::acme::{store_custom_certificate, AcmeIssuer, CertificatePaths, ChallengeStore};
     use anyhow::{bail, Context, Result as AnyResult};
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -331,6 +338,10 @@ mod imp {
             self.set_routes(&config.routes);
             let mut runtime = RuntimeConfig::http_only(config.bind_addr.clone());
 
+            if config.lets_encrypt.is_some() && config.custom_certificate.is_some() {
+                bail!("choose either Let's Encrypt or a custom certificate, not both");
+            }
+
             if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
                 self.ensure_http_listener(&config.bind_addr).await?;
                 let domains = route_domains(&config.https_hosts);
@@ -343,6 +354,12 @@ mod imp {
                     .ensure_certificate(lets_encrypt, &domains)
                     .await
                     .context("ensuring Let's Encrypt certificate")?;
+                runtime.https_bind_addr = config.https_bind_addr.clone();
+                runtime.certificate = Some(certificate);
+            } else if let Some(custom) = config.custom_certificate.as_ref() {
+                let certificate =
+                    store_custom_certificate(&custom.certificate_pem, &custom.private_key_pem)
+                        .context("storing custom HTTPS certificate")?;
                 runtime.https_bind_addr = config.https_bind_addr.clone();
                 runtime.certificate = Some(certificate);
             }

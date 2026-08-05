@@ -11,7 +11,6 @@ import '../widgets/common.dart';
 
 const _transports = transportTypes;
 const _basicServiceTypes = ['tcp', 'udp'];
-const _httpServiceTypes = ['tcp', 'udp', 'http', 'https'];
 
 /// Instance detail: metrics, remote control, and tabs for configuration,
 /// services, client config, traffic, live logs, and agent setup — the mobile
@@ -261,6 +260,7 @@ class _InstancePageState extends State<InstancePage> {
             onChanged: (v) => setState(() => _tab = v),
             tabs: const [
               ShadTab(value: 'config', child: Text('Config')),
+              ShadTab(value: 'http', child: Text('HTTP')),
               ShadTab(value: 'services', child: Text('Services')),
               ShadTab(value: 'client', child: Text('Client')),
               ShadTab(value: 'traffic', child: Text('Traffic')),
@@ -269,12 +269,12 @@ class _InstancePageState extends State<InstancePage> {
             ],
           ),
           const SizedBox(height: 16),
-          if (_tab == 'config' || _tab == 'services')
+          if (_tab == 'config' || _tab == 'http' || _tab == 'services')
             ConfigEditor(
               key: ValueKey('editor-${widget.instanceId}'),
               instanceId: widget.instanceId,
               instance: instance,
-              showServices: _tab == 'services',
+              section: _tab,
               canEdit: isAdmin,
             )
           else if (_tab == 'client')
@@ -369,19 +369,19 @@ class _MetricsRow extends StatelessWidget {
   }
 }
 
-/// Editable working copy of the instance config, covering the Config and
-/// Services tabs, with validation and Save & push — like the web ConfigEditor.
+/// Editable working copy of the instance config, covering the Config, HTTP,
+/// and Services tabs, with validation and Save & push — like the web editor.
 class ConfigEditor extends StatefulWidget {
   final String instanceId;
   final InstanceView instance;
-  final bool showServices;
+  final String section;
   final bool canEdit;
 
   const ConfigEditor({
     super.key,
     required this.instanceId,
     required this.instance,
-    required this.showServices,
+    required this.section,
     required this.canEdit,
   });
 
@@ -400,6 +400,8 @@ class _ConfigEditorState extends State<ConfigEditor> {
   late TextEditingController _domain;
   late TextEditingController _heartbeat;
   late TextEditingController _acmeEmail;
+  late TextEditingController _certificatePem;
+  late TextEditingController _privateKeyPem;
   final List<_ServiceControllers> _serviceControllers = [];
 
   @override
@@ -429,6 +431,10 @@ class _ConfigEditorState extends State<ConfigEditor> {
         text: _config.heartbeatInterval?.toString() ?? '');
     _acmeEmail =
         TextEditingController(text: _config.http?.letsEncrypt?.email ?? '');
+    _certificatePem = TextEditingController(
+        text: _config.http?.customCertificate?.certificatePem ?? '');
+    _privateKeyPem = TextEditingController(
+        text: _config.http?.customCertificate?.privateKeyPem ?? '');
     _serviceControllers.clear();
     for (final svc in _config.services) {
       _serviceControllers.add(_ServiceControllers.from(svc));
@@ -441,6 +447,8 @@ class _ConfigEditorState extends State<ConfigEditor> {
     _domain.dispose();
     _heartbeat.dispose();
     _acmeEmail.dispose();
+    _certificatePem.dispose();
+    _privateKeyPem.dispose();
     for (final c in _serviceControllers) {
       c.dispose();
     }
@@ -474,21 +482,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
       http.enabled = enabled;
       http.bindAddr = httpProxyBindAddr;
       http.httpsBindAddr = httpsProxyBindAddr;
-      if (!enabled) {
-        // Turn HTTP services back into plain TCP forwards.
-        for (var i = 0; i < _config.services.length; i++) {
-          final svc = _config.services[i];
-          if (isHttpServiceType(svc.type)) {
-            svc
-              ..type = 'tcp'
-              ..bindAddr = restorePublicBindAddr(svc, i)
-              ..httpHost = null
-              ..httpHosts = null;
-            _serviceControllers[i].bindAddr.text = svc.bindAddr;
-            _serviceControllers[i].httpHosts.text = '';
-          }
-        }
-      }
     });
   }
 
@@ -497,7 +490,26 @@ class _ConfigEditorState extends State<ConfigEditor> {
       final http = _ensureHttp();
       http.letsEncrypt ??= LetsEncryptConfig();
       http.letsEncrypt!.enabled = enabled;
-      if (enabled) http.enabled = true;
+      if (enabled) {
+        http.enabled = true;
+        http.customCertificate ??= CustomCertificateConfig();
+        http.customCertificate!.enabled = false;
+      }
+      http.bindAddr = httpProxyBindAddr;
+      http.httpsBindAddr = httpsProxyBindAddr;
+    });
+  }
+
+  void _setCustomCertificateEnabled(bool enabled) {
+    setState(() {
+      final http = _ensureHttp();
+      http.customCertificate ??= CustomCertificateConfig();
+      http.customCertificate!.enabled = enabled;
+      if (enabled) {
+        http.enabled = true;
+        http.letsEncrypt ??= LetsEncryptConfig();
+        http.letsEncrypt!.enabled = false;
+      }
       http.bindAddr = httpProxyBindAddr;
       http.httpsBindAddr = httpsProxyBindAddr;
     });
@@ -506,22 +518,12 @@ class _ConfigEditorState extends State<ConfigEditor> {
   void _setServiceType(int i, String type) {
     setState(() {
       final svc = _config.services[i];
-      // http/https need the embedded proxy; tcp/udp are always selectable.
-      final nextType =
-          isHttpServiceType(type) && !(_config.http?.enabled ?? false)
-              ? 'tcp'
-              : type;
-      final wasHttp = isHttpServiceType(svc.type);
-      svc.type = nextType;
-      if (!isHttpServiceType(nextType)) {
+      svc.type = type;
+      if (type == 'udp') {
         svc
           ..httpHost = null
           ..httpHosts = null;
-        if (wasHttp) {
-          svc.bindAddr = restorePublicBindAddr(svc, i);
-          _serviceControllers[i].bindAddr.text = svc.bindAddr;
-          _serviceControllers[i].httpHosts.text = '';
-        }
+        _serviceControllers[i].httpHosts.text = '';
       }
       _config = normalizeConfig(_config);
     });
@@ -529,8 +531,9 @@ class _ConfigEditorState extends State<ConfigEditor> {
 
   void _addService() {
     setState(() {
+      final name = 'service_${_config.services.length + 1}';
       final svc = RatholeService(
-        name: 'service_${_config.services.length + 1}',
+        name: name,
         type: 'tcp',
         bindAddr: '0.0.0.0:5000',
       );
@@ -589,12 +592,15 @@ class _ConfigEditorState extends State<ConfigEditor> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (!widget.showServices) ...[
+        if (widget.section == 'config')
           _controlChannelCard(issueByPath),
-          const SizedBox(height: 12),
+        if (widget.section == 'http') ...[
           _httpProxyCard(issueByPath),
-        ] else
-          _servicesCard(issueByPath),
+          const SizedBox(height: 12),
+          _servicesCard(issueByPath, httpPanel: true),
+        ],
+        if (widget.section == 'services')
+          _servicesCard(issueByPath, httpPanel: false),
         if (issues.isNotEmpty) ...[
           const SizedBox(height: 12),
           _validationCard(issues),
@@ -711,7 +717,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
           Icon(LucideIcons.globe,
               size: 16, color: theme.colorScheme.mutedForeground),
           const SizedBox(width: 8),
-          const Text('HTTP service'),
+          const Text('HTTP proxy'),
         ],
       ),
       child: Padding(
@@ -719,6 +725,12 @@ class _ConfigEditorState extends State<ConfigEditor> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            Text(
+              'HTTP host routing is layered on existing TCP services. '
+              'Manage the TCP listener in Services, then assign its hosts here.',
+              style: theme.textTheme.muted,
+            ),
+            const SizedBox(height: 12),
             _switchRow(
               label: 'Pingora',
               value: http?.enabled ?? false,
@@ -734,6 +746,15 @@ class _ConfigEditorState extends State<ConfigEditor> {
               enabled: canEdit,
               onChanged: _setLetsEncryptEnabled,
             ),
+            const SizedBox(height: 12),
+            _switchRow(
+              label: 'Custom certificate',
+              icon: LucideIcons.keyRound,
+              value: http?.customCertificate?.enabled ?? false,
+              enabled: canEdit,
+              error: issueByPath['http.customCertificate.enabled'],
+              onChanged: _setCustomCertificateEnabled,
+            ),
             const SizedBox(height: 16),
             Field(
               label: 'ACME email',
@@ -748,6 +769,46 @@ class _ConfigEditorState extends State<ConfigEditor> {
                   final h = _ensureHttp();
                   h.letsEncrypt ??= LetsEncryptConfig();
                   h.letsEncrypt!.email = v;
+                }),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Field(
+              label: 'Certificate chain (PEM)',
+              error: issueByPath['http.customCertificate.certificatePem'],
+              child: ShadInput(
+                controller: _certificatePem,
+                enabled:
+                    canEdit && (http?.customCertificate?.enabled ?? false),
+                autocorrect: false,
+                minLines: 5,
+                maxLines: 10,
+                placeholder: const Text('-----BEGIN CERTIFICATE-----\n...'),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                onChanged: (v) => setState(() {
+                  final h = _ensureHttp();
+                  h.customCertificate ??= CustomCertificateConfig();
+                  h.customCertificate!.certificatePem = v;
+                }),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Field(
+              label: 'Private key (PEM)',
+              error: issueByPath['http.customCertificate.privateKeyPem'],
+              child: ShadInput(
+                controller: _privateKeyPem,
+                enabled:
+                    canEdit && (http?.customCertificate?.enabled ?? false),
+                autocorrect: false,
+                minLines: 5,
+                maxLines: 10,
+                placeholder: const Text('-----BEGIN PRIVATE KEY-----\n...'),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                onChanged: (v) => setState(() {
+                  final h = _ensureHttp();
+                  h.customCertificate ??= CustomCertificateConfig();
+                  h.customCertificate!.privateKeyPem = v;
                 }),
               ),
             ),
@@ -802,10 +863,14 @@ class _ConfigEditorState extends State<ConfigEditor> {
     );
   }
 
-  Widget _servicesCard(Map<String, String> issueByPath) {
+  Widget _servicesCard(Map<String, String> issueByPath,
+      {required bool httpPanel}) {
     final theme = ShadTheme.of(context);
     final canEdit = widget.canEdit;
-    final services = _config.services;
+    final serviceIndexes = [
+      for (var i = 0; i < _config.services.length; i++)
+        if (!httpPanel || _config.services[i].type == 'tcp') i,
+    ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -813,8 +878,12 @@ class _ConfigEditorState extends State<ConfigEditor> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Services (${services.length})', style: theme.textTheme.h4),
-            if (canEdit)
+            Text(
+              '${httpPanel ? 'TCP backends' : 'TCP/UDP services'} '
+              '(${serviceIndexes.length})',
+              style: theme.textTheme.h4,
+            ),
+            if (canEdit && !httpPanel)
               ShadButton.outline(
                 size: ShadButtonSize.sm,
                 onPressed: _addService,
@@ -824,34 +893,40 @@ class _ConfigEditorState extends State<ConfigEditor> {
           ],
         ),
         const SizedBox(height: 12),
-        if (services.isEmpty)
+        if (serviceIndexes.isEmpty)
           ShadCard(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Text(
-                'No services.'
-                '${canEdit ? ' Add one to forward a port from behind NAT.' : ''}',
+                httpPanel
+                    ? 'No TCP services. Add one in the Services tab before '
+                        'assigning HTTP hosts.'
+                    : 'No TCP/UDP services.'
+                        '${canEdit ? ' Add one to forward a port from behind NAT.' : ''}',
                 style: theme.textTheme.muted,
               ),
             ),
           )
         else
-          for (var i = 0; i < services.length; i++) ...[
-            _serviceCard(i, issueByPath),
-            if (i < services.length - 1) const SizedBox(height: 12),
+          for (var position = 0;
+              position < serviceIndexes.length;
+              position++) ...[
+            _serviceCard(serviceIndexes[position], issueByPath,
+                httpPanel: httpPanel),
+            if (position < serviceIndexes.length - 1)
+              const SizedBox(height: 12),
           ],
       ],
     );
   }
 
-  Widget _serviceCard(int i, Map<String, String> issueByPath) {
+  Widget _serviceCard(int i, Map<String, String> issueByPath,
+      {required bool httpPanel}) {
     final theme = ShadTheme.of(context);
     final canEdit = widget.canEdit;
     final svc = _config.services[i];
     final controllers = _serviceControllers[i];
-    final httpEnabled = _config.http?.enabled ?? false;
-    final serviceTypes = httpEnabled ? _httpServiceTypes : _basicServiceTypes;
-    final isHttp = isHttpServiceType(svc.type);
+    const serviceTypes = _basicServiceTypes;
     final traffic = widget.instance.traffic?[svc.name];
     final httpHostIssue = issueByPath['services[$i].httpHosts'] ??
         issueByPath['services[$i].httpHost'];
@@ -880,7 +955,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
                       color: theme.colorScheme.mutedForeground)),
             ],
           ),
-          if (canEdit)
+          if (canEdit && !httpPanel)
             ShadIconButton.ghost(
               icon: Icon(LucideIcons.trash2,
                   size: 16, color: theme.colorScheme.destructive),
@@ -893,34 +968,54 @@ class _ConfigEditorState extends State<ConfigEditor> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Field(
-              label: 'Name',
-              error: issueByPath['services[$i].name'],
-              child: ShadInput(
-                controller: controllers.name,
-                enabled: canEdit,
-                autocorrect: false,
-                style: const TextStyle(fontFamily: 'monospace'),
-                onChanged: (v) => setState(() => svc.name = v),
+            if (httpPanel) ...[
+              Field(
+                label: 'TCP backend',
+                child: ShadInput(
+                  controller: controllers.name,
+                  enabled: false,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            Field(
-              label: 'Type',
-              child: ShadSelect<String>(
-                key: ValueKey('type-$i-${svc.type}'),
-                initialValue: svc.type,
-                enabled: canEdit,
-                options: serviceTypes
-                    .map((t) => ShadOption(value: t, child: Text(t)))
-                    .toList(),
-                selectedOptionBuilder: (context, value) => Text(value),
-                onChanged: (v) {
-                  if (v != null) _setServiceType(i, v);
-                },
+              const SizedBox(height: 12),
+              Field(
+                label: 'TCP bind',
+                child: ShadInput(
+                  controller: controllers.bindAddr,
+                  enabled: false,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                ),
               ),
-            ),
-            if (isHttp) ...[
+            ] else ...[
+              Field(
+                label: 'Name',
+                error: issueByPath['services[$i].name'],
+                child: ShadInput(
+                  controller: controllers.name,
+                  enabled: canEdit,
+                  autocorrect: false,
+                  style: const TextStyle(fontFamily: 'monospace'),
+                  onChanged: (v) => setState(() => svc.name = v),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Field(
+                label: 'Type',
+                child: ShadSelect<String>(
+                  key: ValueKey('type-$i-${svc.type}'),
+                  initialValue: svc.type,
+                  enabled: canEdit,
+                  options: serviceTypes
+                      .map((t) => ShadOption(value: t, child: Text(t)))
+                      .toList(),
+                  selectedOptionBuilder: (context, value) => Text(value),
+                  onChanged: (v) {
+                    if (v != null) _setServiceType(i, v);
+                  },
+                ),
+              ),
+            ],
+            if (httpPanel) ...[
               const SizedBox(height: 12),
               Field(
                 label: 'HTTP hosts',
@@ -951,31 +1046,33 @@ class _ConfigEditorState extends State<ConfigEditor> {
                 ),
               ),
             ],
-            const SizedBox(height: 12),
-            Field(
-              label: 'Token',
-              child: ShadInput(
-                controller: controllers.token,
-                enabled: canEdit,
-                autocorrect: false,
-                placeholder: const Text('inherits default'),
-                style: const TextStyle(fontFamily: 'monospace'),
-                onChanged: (v) =>
-                    setState(() => svc.token = v.isEmpty ? null : v),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('nodelay', style: theme.textTheme.small),
-                ShadSwitch(
-                  value: svc.nodelay ?? false,
+            if (!httpPanel) ...[
+              const SizedBox(height: 12),
+              Field(
+                label: 'Token',
+                child: ShadInput(
+                  controller: controllers.token,
                   enabled: canEdit,
-                  onChanged: (v) => setState(() => svc.nodelay = v),
+                  autocorrect: false,
+                  placeholder: const Text('inherits default'),
+                  style: const TextStyle(fontFamily: 'monospace'),
+                  onChanged: (v) =>
+                      setState(() => svc.token = v.isEmpty ? null : v),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('nodelay', style: theme.textTheme.small),
+                  ShadSwitch(
+                    value: svc.nodelay ?? false,
+                    enabled: canEdit,
+                    onChanged: (v) => setState(() => svc.nodelay = v),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

@@ -20,10 +20,7 @@ bool isHttpServiceType(String type) => type == 'http' || type == 'https';
 bool isHttpService(RatholeService svc) => isHttpServiceType(svc.type);
 
 bool hasHttpRoute(RatholeService svc) =>
-    isHttpService(svc) || serviceHttpHosts(svc).isNotEmpty;
-
-bool hasHttpsRoute(RatholeService svc) =>
-    svc.type == 'https' && serviceHttpHosts(svc).isNotEmpty;
+    serviceHttpHosts(svc).isNotEmpty;
 
 String defaultPublicBindAddr(int i) => '0.0.0.0:${5000 + i}';
 
@@ -59,45 +56,29 @@ List<String> serviceHttpHosts(RatholeService service) {
 }
 
 /// Normalize persisted/API configs before editing or saving; mirrors the web
-/// panel's normalizeConfig (legacy httpHost migration, memory:// bind
-/// assignment, http proxy fixed addresses).
+/// panel's normalizeConfig (legacy service/type migration and fixed proxy
+/// addresses).
 RatholeConfig normalizeConfig(RatholeConfig input) {
   final config = input.clone();
-  final httpEnabled = config.http?.enabled ?? false;
 
   final services = <RatholeService>[];
   for (var i = 0; i < config.services.length; i++) {
     final service = config.services[i].clone();
-    final httpHosts = httpEnabled ? serviceHttpHosts(service) : <String>[];
-    var serviceType = service.type;
-    if (!httpEnabled && isHttpService(service)) {
-      serviceType = 'tcp';
-    } else if (httpHosts.isNotEmpty && service.type == 'tcp') {
-      serviceType = 'http';
-    }
-    var bindAddr = service.bindAddr;
-    if (serviceType == 'tcp' && isHttpService(service)) {
-      bindAddr = restorePublicBindAddr(service, i);
-    }
+    final httpHosts = serviceHttpHosts(service);
+    final legacyHttpService = isHttpService(service);
     service
-      ..type = serviceType
-      ..bindAddr = bindAddr
+      ..type = legacyHttpService ? 'tcp' : service.type
+      ..bindAddr = legacyHttpService
+          ? restorePublicBindAddr(service, i)
+          : service.bindAddr
       ..httpHost = null
       ..httpHosts = httpHosts.isNotEmpty ? httpHosts : null;
     services.add(service);
   }
 
-  // Assign internal memory:// bind addresses to HTTP/HTTPS services.
-  for (var i = 0; i < services.length; i++) {
-    final service = services[i];
-    if (!isHttpService(service)) continue;
-    final name = service.name.trim();
-    final key = name.isNotEmpty ? name : 'service_${i + 1}';
-    service.bindAddr = '$httpServiceBindAddrPrefix$key';
-  }
-
   if (config.http != null) {
     final le = config.http!.letsEncrypt;
+    final custom = config.http!.customCertificate;
     config.http = HttpProxyConfig(
       enabled: config.http!.enabled,
       bindAddr: httpProxyBindAddr,
@@ -108,6 +89,13 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
               enabled: le.enabled,
               email: le.email.trim(),
               staging: le.staging,
+            ),
+      customCertificate: custom == null
+          ? null
+          : CustomCertificateConfig(
+              enabled: custom.enabled,
+              certificatePem: custom.certificatePem.trim(),
+              privateKeyPem: custom.privateKeyPem.trim(),
             ),
     );
   }
@@ -229,9 +217,12 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
 
   final httpEnabled = config.http?.enabled ?? false;
   final letsEncryptEnabled = config.http?.letsEncrypt?.enabled ?? false;
+  final customCertificateEnabled =
+      config.http?.customCertificate?.enabled ?? false;
   final httpRoutes = config.services.where(hasHttpRoute).toList();
-  final letsEncryptActive =
-      letsEncryptEnabled && config.services.any(hasHttpsRoute);
+  final letsEncryptActive = letsEncryptEnabled && httpRoutes.isNotEmpty;
+  final customCertificateActive =
+      customCertificateEnabled && httpRoutes.isNotEmpty;
   if (httpEnabled || httpRoutes.isNotEmpty) {
     final httpBindAddr = config.http?.bindAddr.trim().isNotEmpty == true
         ? config.http!.bindAddr.trim()
@@ -241,11 +232,26 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
           'http.bindAddr', 'HTTP proxy always listens on $httpProxyBindAddr.'));
     }
   }
-  if (!httpEnabled && httpRoutes.isNotEmpty) {
-    issues.add(const ValidationIssue(
-        'http.enabled', 'Enable the HTTP proxy before assigning HTTP hosts.'));
+  if (letsEncryptEnabled && customCertificateEnabled) {
+    issues.add(const ValidationIssue('http.customCertificate.enabled',
+        "Choose either Let's Encrypt or a custom certificate, not both."));
   }
-  if (letsEncryptActive) {
+  if (customCertificateEnabled) {
+    final certificatePem =
+        config.http?.customCertificate?.certificatePem.trim() ?? '';
+    final privateKeyPem =
+        config.http?.customCertificate?.privateKeyPem.trim() ?? '';
+    if (!certificatePem.contains('-----BEGIN CERTIFICATE-----')) {
+      issues.add(const ValidationIssue('http.customCertificate.certificatePem',
+          'Custom certificate must contain a PEM certificate chain.'));
+    }
+    if (!RegExp(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----')
+        .hasMatch(privateKeyPem)) {
+      issues.add(const ValidationIssue('http.customCertificate.privateKeyPem',
+          'Custom certificate must contain a PEM private key.'));
+    }
+  }
+  if (letsEncryptActive || customCertificateActive) {
     final httpsBindAddr = config.http?.httpsBindAddr?.trim().isNotEmpty == true
         ? config.http!.httpsBindAddr!.trim()
         : httpsProxyBindAddr;
@@ -269,27 +275,17 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
     }
     seen.add(svc.name);
 
-    if (!isHttpService(svc)) {
-      final publicBindError = _validateHostPort(svc.bindAddr, '[::]:5000');
-      if (publicBindError != null) {
-        issues.add(ValidationIssue('$base.bindAddr',
-            'Service "$label" public bind address $publicBindError'));
-      }
+    final publicBindError = _validateHostPort(svc.bindAddr, '[::]:5000');
+    if (publicBindError != null) {
+      issues.add(ValidationIssue('$base.bindAddr',
+          'Service "$label" public bind address $publicBindError'));
     }
 
     final httpHosts = serviceHttpHosts(svc);
-    if (isHttpService(svc) && httpHosts.isEmpty) {
-      issues.add(ValidationIssue(
-          '$base.httpHosts', 'Service "$label" needs at least one HTTP host.'));
-    }
     if (httpHosts.isNotEmpty) {
       if (svc.type == 'udp') {
         issues.add(ValidationIssue('$base.httpHosts',
             'Service "$label" cannot be UDP and receive HTTP proxy traffic.'));
-      }
-      if (svc.type == 'tcp') {
-        issues.add(ValidationIssue('$base.httpHosts',
-            'Service "$label" must be HTTP or HTTPS to use an HTTP host.'));
       }
       for (var hostIndex = 0; hostIndex < httpHosts.length; hostIndex++) {
         final httpHost = httpHosts[hostIndex];

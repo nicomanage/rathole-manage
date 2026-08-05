@@ -48,26 +48,22 @@ void main() {
       expect(issues.map((i) => i.path), contains('defaultToken'));
     });
 
-    test('requires HTTP proxy for http services', () {
+    test('allows TCP HTTP routes while proxy is disabled', () {
       final config = baseConfig()
         ..services.add(RatholeService(
             name: 'web',
-            type: 'http',
-            bindAddr: 'memory://web',
+            type: 'tcp',
+            bindAddr: '0.0.0.0:8080',
             httpHosts: ['app.example.com']));
-      final issues = validateConfig(config);
-      expect(issues.map((i) => i.path), contains('http.enabled'));
+      expect(validateConfig(config), isEmpty);
     });
 
-    test('http service needs at least one host', () {
+    test('TCP services do not need an HTTP host', () {
       final config = baseConfig()
         ..http = HttpProxyConfig(enabled: true, bindAddr: '[::]:80')
         ..services.add(RatholeService(
-            name: 'web', type: 'http', bindAddr: 'memory://web'));
-      final issues = validateConfig(config);
-      expect(
-          issues.any((i) => i.message.contains('needs at least one HTTP host')),
-          isTrue);
+            name: 'web', type: 'tcp', bindAddr: '0.0.0.0:8080'));
+      expect(validateConfig(config), isEmpty);
     });
 
     test('rejects duplicate HTTP hosts across services', () {
@@ -76,13 +72,13 @@ void main() {
         ..services.addAll([
           RatholeService(
               name: 'web1',
-              type: 'http',
-              bindAddr: 'memory://web1',
+              type: 'tcp',
+              bindAddr: '0.0.0.0:8080',
               httpHosts: ['app.example.com']),
           RatholeService(
               name: 'web2',
-              type: 'http',
-              bindAddr: 'memory://web2',
+              type: 'tcp',
+              bindAddr: '0.0.0.0:8081',
               httpHosts: ['APP.example.com']),
         ]);
       final issues = validateConfig(config);
@@ -93,6 +89,44 @@ void main() {
     test('rejects invalid port range', () {
       final config = baseConfig()..services[0].bindAddr = '0.0.0.0:70000';
       expect(validateConfig(config), isNotEmpty);
+    });
+
+    test('accepts a custom PEM certificate for TCP HTTP routes', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          httpsBindAddr: httpsProxyBindAddr,
+          customCertificate: CustomCertificateConfig(
+            enabled: true,
+            certificatePem:
+                '-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----',
+            privateKeyPem:
+                '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----',
+          ),
+        )
+        ..services[0].httpHosts = ['app.example.com'];
+      expect(validateConfig(config), isEmpty);
+    });
+
+    test('rejects two HTTPS certificate sources', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          letsEncrypt: LetsEncryptConfig(enabled: true),
+          customCertificate: CustomCertificateConfig(
+            enabled: true,
+            certificatePem:
+                '-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----',
+            privateKeyPem:
+                '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----',
+          ),
+        );
+      expect(
+          validateConfig(config)
+              .any((issue) => issue.path == 'http.customCertificate.enabled'),
+          isTrue);
     });
   });
 
@@ -109,10 +143,11 @@ void main() {
       final web = normalized.services[1];
       expect(web.httpHost, isNull);
       expect(web.httpHosts, ['a.example.com', 'b.example.com']);
-      expect(web.bindAddr, 'memory://web');
+      expect(web.type, 'tcp');
+      expect(web.bindAddr, '0.0.0.0:8080');
     });
 
-    test('downgrades http services to tcp when proxy disabled', () {
+    test('migrates legacy HTTP services and preserves their routes', () {
       final config = baseConfig()
         ..services.add(RatholeService(
             name: 'web',
@@ -122,16 +157,16 @@ void main() {
       final normalized = normalizeConfig(config);
       final web = normalized.services[1];
       expect(web.type, 'tcp');
-      expect(web.httpHosts, isNull);
+      expect(web.httpHosts, ['app.example.com']);
       expect(web.bindAddr, '0.0.0.0:5001');
     });
 
-    test('upgrades tcp with hosts to http when proxy enabled', () {
+    test('keeps routed services as TCP when proxy enabled', () {
       final config = baseConfig()
         ..http = HttpProxyConfig(enabled: true, bindAddr: '[::]:80')
         ..services[0].httpHosts = ['ssh.example.com'];
       final normalized = normalizeConfig(config);
-      expect(normalized.services[0].type, 'http');
+      expect(normalized.services[0].type, 'tcp');
     });
 
     test('pins proxy bind addresses', () {
@@ -201,8 +236,8 @@ void main() {
     test('dedupes case-insensitively preserving first casing', () {
       final svc = RatholeService(
           name: 'web',
-          type: 'http',
-          bindAddr: 'memory://web',
+          type: 'tcp',
+          bindAddr: '0.0.0.0:8080',
           httpHosts: ['App.example.com'],
           httpHost: 'app.example.com, other.example.com');
       expect(serviceHttpHosts(svc), ['App.example.com', 'other.example.com']);

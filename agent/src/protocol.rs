@@ -50,11 +50,20 @@ pub struct LetsEncryptConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CustomCertificateConfig {
+    pub enabled: bool,
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HttpProxyConfig {
     pub enabled: bool,
     pub bind_addr: String,
     pub https_bind_addr: Option<String>,
     pub lets_encrypt: Option<LetsEncryptConfig>,
+    pub custom_certificate: Option<CustomCertificateConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
