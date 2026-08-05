@@ -1,7 +1,7 @@
 # rathole-manage
 
 A management panel for [rathole](https://github.com/rapiz1/rathole) servers.
-The control plane runs on **Cloudflare Workers** (Worker + Durable Object), the UI
+The control plane runs on **Cloudflare Workers** (Worker + Durable Object + D1), the UI
 is **React + shadcn/ui**, and each rathole node is driven by a small **Rust agent
 that embeds rathole as a library** and talks to the panel over **WebSocket**.
 
@@ -23,38 +23,41 @@ From the panel you can:
                        ┌──────────────────────────────────────────┐
    Browser (shadcn) ───┤  Cloudflare Worker            ASSETS ─────┼─ static SPA
        REST + WS ▲     │    /api/ws          (live updates/logs)   │
-               │       │    /api/agent/ws    (agent token)         │
+               │       │    /api/agent/ws    (control/logs)        │
+               │       │    /api/agent/report (status → D1)        │
                ▼       │    /api/instances   (REST)                │
         ┌──────────────┴──────────────┐                            │
         │  Durable Object: RatholeHub │  ← hibernatable WS,        │
         │  persists instances/configs │    SQLite storage          │
         └──────────────┬──────────────┘                            │
-                       │  WebSocket (wss)                          │
+                       │  WebSocket + HTTP                         │
                        ▼                                            │
               ┌──────────────────┐                                 │
               │  rathole-agent   │  (Rust, on each server)         │
               │  ├─ embeds rathole::run() in-process               │
               │  ├─ embeds Pingora for HTTP/HTTPS Host proxying     │
               │  ├─ applies typed config via patched rathole API    │
-              │  └─ streams logs + direct state/metrics back        │
+               │  └─ streams logs; reports state/metrics via HTTP    │
               └──────────────────┘
 ```
 
 - **`src/worker/`** — Worker entry (`index.ts`), Worker-only server config
   generation (`server-config.ts`), and the `RatholeHub` Durable Object (`hub.ts`).
-  The hub holds every agent + browser socket using hibernatable WebSockets,
-  persists instances/global settings in DO storage, and fans updates out live.
+  The hub holds every agent + browser socket using hibernatable WebSockets and
+  persists instances/global settings in DO storage. Periodic agent state goes
+  directly through the Worker to D1, so reports do not wake the shared DO;
+  panel reads merge D1 state back into the instance view.
 - **`src/react-app/`** — the shadcn/ui dashboard.
 - **`src/shared/`** — shared types, validation, and client config generation.
 - **`agent/`** — the Rust agent. It depends on the `rathole` crate and calls
   `rathole::run()` directly, so there is **no separate rathole binary** to install.
 
-The web panel uses REST for initial state, resynchronization, CRUD, settings, and
-commands. Its WebSocket is reserved for live status/metric deltas and log streams.
+The web panel uses REST for initial state, periodic status resynchronization,
+CRUD, settings, and commands. Its WebSocket is reserved for control deltas and logs.
 
 ## Prerequisites
 
-- Node 20+ and a Cloudflare account (Workers + Durable Objects, available on the
+- Node 20+ and a Cloudflare account (Workers + Durable Objects + D1, available on the
   free plan) for the panel.
 - Rust (stable) on each rathole server for the agent.
 
@@ -63,6 +66,7 @@ commands. Its WebSocket is reserved for live status/metric deltas and log stream
 ```bash
 npm install
 cp .dev.vars.example .dev.vars   # set the session secret
+npm run db:migrate:local         # create/update the local status database
 npm run dev                      # Vite + Worker via @cloudflare/vite-plugin
 ```
 
@@ -76,12 +80,14 @@ one-command deployment:
 
 ```bash
 npx wrangler login               # only needed once per machine
+npm run db:create                # one-time: create rathole-manage-status
 npm run deploy:cloudflare
 ```
 
-This command creates a git-ignored `.prod.vars` with a cryptographically secure
+The deploy command creates a git-ignored `.prod.vars` with a cryptographically secure
 `SESSION_SECRET` when needed, runs the test suite and production build, and
-uploads the Worker, static SPA, Durable Object migration, and secret together.
+applies pending D1 migrations before uploading the Worker, static SPA, Durable
+Object migration, and secret together.
 Keep `.prod.vars` safe: later deployments reuse it so existing sessions remain
 valid. To validate the complete bundle without uploading it, run
 `npm run deploy:check`.
@@ -91,7 +97,8 @@ Settings → Builds** and use `npm run build` as the build command and
 `npx wrangler deploy` as the deploy command. Add `SESSION_SECRET` once under the
 Worker's **Settings → Variables & Secrets**; build-time secrets are not runtime
 Worker secrets. The Worker name must remain `rathole-manage`, matching
-`wrangler.jsonc`.
+`wrangler.jsonc`. Create the D1 database once and run
+`npm run db:migrate:remote` before the first automated deployment.
 
 The Durable Object migration in `wrangler.jsonc` is applied automatically on
 the first deployment. Run `npm run cf-typegen` after changing bindings.
@@ -195,7 +202,10 @@ directly.
 | `npm run build` | typecheck + build the SPA and Worker |
 | `npm run check` | typecheck UI and Worker |
 | `npm run deploy` | build and `wrangler deploy` |
-| `npm run deploy:cloudflare` | test, build, securely provision the session secret, and deploy |
+| `npm run db:create` | create the production D1 status database (one time) |
+| `npm run db:migrate:local` | apply status migrations to local D1 |
+| `npm run db:migrate:remote` | apply status migrations to production D1 |
+| `npm run deploy:cloudflare` | test, build, migrate D1, provision the session secret, and deploy |
 | `npm run deploy:check` | perform the same validation and a Wrangler dry run without uploading |
 | `npm run cf-typegen` | regenerate `worker-configuration.d.ts` |
 | `cargo build --release` (in `agent/`) | build the Rust agent |

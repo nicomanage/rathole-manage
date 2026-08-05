@@ -13,6 +13,9 @@
     "deploy": "npm run build && wrangler deploy",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "deploy:check": "node scripts/deploy-cloudflare.mjs --dry-run",
+    "db:create": "wrangler d1 create rathole-manage-status",
+    "db:migrate:local": "wrangler d1 migrations apply STATUS_DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply STATUS_DB --remote",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

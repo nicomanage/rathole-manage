@@ -108,7 +108,14 @@ export function useHubSocket() {
     closedRef.current = false;
     void refresh().catch(() => undefined);
     connect();
+    // Agent reports are written directly to D1 and therefore do not wake the
+    // hub WebSocket. Poll queryable state while the socket remains dedicated
+    // to control events and logs.
+    const refreshTimer = window.setInterval(() => {
+      void refresh().catch(() => undefined);
+    }, 30_000);
     return () => {
+      window.clearInterval(refreshTimer);
       closedRef.current = true;
       wsRef.current?.close();
     };

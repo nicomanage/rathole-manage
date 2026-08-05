@@ -23,6 +23,13 @@
       }
     ]
   },
+  "d1_databases": [
+    {
+      "binding": "STATUS_DB",
+      "database_name": "rathole-manage-status",
+      "migrations_dir": "migrations"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",

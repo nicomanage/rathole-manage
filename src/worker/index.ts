@@ -10,6 +10,13 @@
 import { RatholeHub } from "./hub";
 import { defaultConfig, normalizeConfig, validateConfig } from "@shared/config-generator";
 import { hashPassword, verifyPassword } from "./passwords";
+import {
+  agentCredentialMatches,
+  deleteAgentState,
+  parseAgentReport,
+  storeAgentReport,
+  syncAgentInstance,
+} from "./agent-reports";
 import type {
   AgentCommand,
   CreateInstanceInput,
@@ -28,6 +35,7 @@ export { RatholeHub };
 
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
+  STATUS_DB: D1Database;
   ASSETS: Fetcher;
   SESSION_SECRET: string;
 }
@@ -38,6 +46,7 @@ const ROLES: Role[] = ["admin", "viewer"];
 const JSON_HEADERS = { "content-type": "application/json" };
 const SESSION_COOKIE = "rathole_session";
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const MAX_AGENT_REPORT_BYTES = 256 * 1024;
 const encoder = new TextEncoder();
 
 function json(data: unknown, status = 200, headers?: HeadersInit): Response {
@@ -204,9 +213,45 @@ function newInstance(
   };
 }
 
+/** Accept a status report without creating or invoking a Durable Object stub. */
+async function handleAgentReport(req: Request, env: Env, url: URL): Promise<Response> {
+  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+  const declaredLength = Number(req.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_AGENT_REPORT_BYTES) {
+    return json({ error: "report too large" }, 413);
+  }
+  const instanceId = url.searchParams.get("instance")?.trim() ?? "";
+  const authorization = req.headers.get("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  if (!instanceId || !token) return unauthorized();
+
+  const raw = await req.text();
+  if (encoder.encode(raw).byteLength > MAX_AGENT_REPORT_BYTES) {
+    return json({ error: "report too large" }, 413);
+  }
+  const parsed = (() => {
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  })();
+  const report = parseAgentReport(parsed);
+  if (!report) return json({ error: "invalid status report" }, 400);
+
+  const authenticated = await agentCredentialMatches(env.STATUS_DB, instanceId, token);
+  if (authenticated !== true) return unauthorized();
+  await storeAgentReport(env.STATUS_DB, instanceId, report);
+  return json({ accepted: true }, 202);
+}
+
 async function handleApi(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
+
+  // Periodic agent status is intentionally handled before a DO stub exists.
+  if (path === "/api/agent/report") return handleAgentReport(req, env, url);
+
   const stub = hub(env);
 
   // ---- username/password session -----------------------------------------
@@ -280,6 +325,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     const existing = await stub.findInstanceByNodeId(nodeId);
     if (existing) {
       // Idempotent: same node re-enrolling reclaims its existing credentials.
+      await syncAgentInstance(env.STATUS_DB, existing);
       return json({
         instanceId: existing.id,
         agentToken: existing.agentToken,
@@ -297,6 +343,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     const issues = validateConfig(inst.config);
     if (issues.length > 0) return json({ error: "invalid configuration", issues }, 400);
     await stub.createInstance(inst);
+    await syncAgentInstance(env.STATUS_DB, inst);
     return json(
       { instanceId: inst.id, agentToken: inst.agentToken, name: inst.name, created: true },
       201,
@@ -312,6 +359,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
     const token = url.searchParams.get("token") ?? "";
     const inst = await stub.getInstance(instanceId);
     if (!inst || inst.agentToken !== token) return unauthorized();
+    await syncAgentInstance(env.STATUS_DB, inst);
     const ip =
       req.headers.get("cf-connecting-ip") ??
       req.headers.get("x-real-ip") ??
@@ -519,6 +567,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
       if (req.method === "DELETE") {
         if (!isAdmin) return forbidden();
         await stub.deleteInstance(id);
+        await deleteAgentState(env.STATUS_DB, id);
         return json({ ok: true });
       }
     }

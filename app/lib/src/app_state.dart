@@ -36,6 +36,7 @@ class AppState extends ChangeNotifier {
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
   Timer? _reconnectTimer;
+  Timer? _refreshTimer;
   int _retry = 0;
   bool _closed = true;
   bool _initialLoadSettled = false;
@@ -138,12 +139,19 @@ class AppState extends ChangeNotifier {
   void connect() {
     _closed = false;
     unawaited(refresh());
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(refresh()),
+    );
     _connect();
   }
 
   void disconnect() {
     _closed = true;
     _reconnectTimer?.cancel();
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
     _wsSub?.cancel();
     _ws?.sink.close();
     _ws = null;

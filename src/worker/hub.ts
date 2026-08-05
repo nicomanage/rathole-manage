@@ -25,6 +25,7 @@ import type {
 } from "@shared/types";
 import { hashServerConfig } from "./server-config";
 import { accumulateMonthlyTraffic } from "./traffic";
+import { mergeAgentState, readAgentStates } from "./agent-reports";
 
 /** Result of a user mutation that can fail validation. */
 export type UserMutation =
@@ -41,17 +42,10 @@ function toUserView(user: User): UserView {
 
 interface Env {
   RATHOLE_HUB: DurableObjectNamespace<RatholeHub>;
+  STATUS_DB: D1Database;
   ASSETS: Fetcher;
 }
 
-/** No status for this long ⇒ stale (3 missed reports at the agent's 60s cadence). */
-const OFFLINE_AFTER_MS = 180_000;
-/**
- * Liveness alarm period. The alarm only runs while agent sockets are connected,
- * and only catches half-open sockets — a clean disconnect is handled instantly
- * by webSocketClose — so it can stay coarse. Every tick wakes the DO.
- */
-const ALARM_PERIOD_MS = 120_000;
 /**
  * Routine status reports (lastSeen, cpu/mem, traffic counters) are persisted at
  * most this often per instance; material changes persist immediately. Keeps DO
@@ -159,9 +153,6 @@ export class RatholeHub extends DurableObject<Env> {
         }
       }
       this.loaded = true;
-      // Liveness is re-evaluated via alarm, but only while agents are connected —
-      // an idle DO must be able to sleep indefinitely.
-      if (this.hasAgentSockets()) await this.ensureAlarm();
     });
   }
 
@@ -172,17 +163,6 @@ export class RatholeHub extends DurableObject<Env> {
     this.instances.set(inst.id, inst);
     this.lastPersistAt.set(inst.id, inst.updatedAt);
     await this.ctx.storage.put(`instance:${inst.id}`, inst);
-  }
-
-  private hasAgentSockets(): boolean {
-    return this.ctx
-      .getWebSockets()
-      .some((ws) => (this.ctx.getTags(ws)[0] ?? "").startsWith("agent:"));
-  }
-
-  private async ensureAlarm() {
-    const alarm = await this.ctx.storage.getAlarm();
-    if (alarm === null) await this.ctx.storage.setAlarm(Date.now() + ALARM_PERIOD_MS);
   }
 
   private agentAttachment(ws: WebSocket): AgentSocketAttachment | null {
@@ -226,16 +206,21 @@ export class RatholeHub extends DurableObject<Env> {
   // ---- public API used by the Worker fetch handler ------------------------
 
   async listInstances(): Promise<InstanceView[]> {
+    let reports = new Map();
+    try {
+      reports = await readAgentStates(this.env.STATUS_DB);
+    } catch (error) {
+      // Keep the control plane usable while a new deployment is waiting for its
+      // D1 migration. Agent report ingestion will surface that setup error.
+      console.error("could not read agent status from D1", error);
+    }
     return [...this.instances.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map((inst) => {
-        // Safety net for a stored "online" that never got closed out (e.g. the
-        // DO was evicted without a close event): present the truth, no write.
-        if (inst.status === "online" && this.ctx.getWebSockets(`agent:${inst.id}`).length === 0) {
-          return toView({ ...inst, status: "offline", processState: "unknown" });
-        }
-        return toView(inst);
-      });
+      .map((inst) => mergeAgentState(
+        inst,
+        reports.get(inst.id),
+        this.ctx.getWebSockets(`agent:${inst.id}`).length > 0,
+      ));
   }
 
   async getInstance(id: string): Promise<Instance | undefined> {
@@ -416,8 +401,6 @@ export class RatholeHub extends DurableObject<Env> {
       await this.persist(inst);
       this.attachAgentState(instanceId, inst, false);
     }
-    // Liveness checks run only while at least one agent is connected.
-    await this.ensureAlarm();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -475,35 +458,8 @@ export class RatholeHub extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    const now = Date.now();
-    try {
-      for (const inst of this.instances.values()) {
-        const connected = this.ctx.getWebSockets(`agent:${inst.id}`).length > 0;
-        let seen = this.lastStatusAt.get(inst.id);
-        if (connected && seen === undefined) {
-          // Just woke from hibernation with a live socket: grant a grace period
-          // instead of trusting the (throttled, possibly old) persisted lastSeen.
-          seen = now;
-          this.lastStatusAt.set(inst.id, now);
-          this.attachAgentState(inst.id, inst, true);
-        }
-        const stale = seen === undefined || now - seen > OFFLINE_AFTER_MS;
-        const next: Instance["status"] = connected && !stale ? "online" : "offline";
-        if (next !== inst.status) {
-          inst.status = next;
-          if (next === "offline") {
-            inst.processState = "unknown";
-            inst.serviceStatus = undefined;
-          }
-          await this.persist(inst);
-          this.attachAgentState(inst.id, inst, false);
-          this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
-        }
-      }
-    } finally {
-      // Keep checking only while agents are connected, even if this run failed.
-      if (this.hasAgentSockets()) await this.ctx.storage.setAlarm(Date.now() + ALARM_PERIOD_MS);
-    }
+    // Kept only so alarms scheduled by an older deployment drain harmlessly.
+    // Status freshness now comes from D1 when the panel reads instance state.
   }
 
   // ---- message handling ---------------------------------------------------
@@ -513,8 +469,8 @@ export class RatholeHub extends DurableObject<Env> {
     if (!inst) {
       this.safeSend(ws, { type: "error", message: "unknown instance" });
       return;
-    }
-    switch (msg.type) {
+      }
+      switch (msg.type) {
       case "register": {
         if (msg.token !== inst.agentToken) {
           this.safeSend(ws, { type: "error", message: "bad token" });

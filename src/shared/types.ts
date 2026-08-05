@@ -151,7 +151,7 @@ export interface AgentMetrics {
 export interface Instance {
   id: string;
   name: string;
-  /** Secret the agent uses to authenticate its WebSocket to the hub. */
+  /** Secret the agent uses to authenticate control WebSocket and HTTP reports. */
   agentToken: string;
   /**
    * Stable identifier of the node that self-enrolled this instance (e.g. the
@@ -197,9 +197,15 @@ export type InstanceView = Omit<Instance, "agentToken"> & {
 
 // ---- WebSocket protocol ----------------------------------------------------
 
-/** Messages an agent (running on a rathole box) sends to the hub. */
+/** Agent messages. Status uses HTTP/D1; the remaining messages use the control WebSocket. */
 export type AgentToHub =
-  | { type: "register"; instanceId: string; token: string; agentVersion?: string; hostname?: string }
+  | {
+      type: "register";
+      instanceId: string;
+      token: string;
+      agentVersion?: string;
+      hostname?: string;
+    }
   | {
       type: "status";
       processState: ProcessState;

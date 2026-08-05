@@ -1,9 +1,9 @@
 //! rathole-agent — runs on a rathole server node.
 //!
 //! It embeds rathole as a library (see `runner.rs`), dials the rathole-manage
-//! hub over WebSocket, applies the config the panel generates, streams logs and
-//! metrics back, and executes start/stop/restart commands. The embedded rathole
-//! keeps serving tunnels even while the hub is unreachable.
+//! hub over WebSocket, applies the config the panel generates, reports status
+//! over HTTP, streams logs, and executes start/stop/restart commands. The
+//! embedded rathole keeps serving tunnels even while the hub is unreachable.
 //!
 //! Commands:
 //!   rathole-agent login   interactive TUI: sign in with your panel account and
@@ -36,6 +36,7 @@ use runner::Runner;
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
 
 /// Everything the daemon needs to connect and manage its instance.
+#[derive(Clone)]
 struct RunConfig {
     /// Panel origin (http/https), e.g. `https://panel.example.com`.
     hub_base: String,
@@ -148,11 +149,9 @@ fn resolve_run_config() -> Result<RunConfig> {
 
 /// How often the agent reports status/metrics to the hub.
 ///
-/// All agents share one hub Durable Object, which can only hibernate (and stop
-/// billing duration) while no agent is reporting, so reports must stay sparse.
-/// Override with STATUS_INTERVAL_SECS for a snappier panel at higher cost;
-/// values below 5s are ignored. The hub treats an agent as offline after three
-/// missed reports at this cadence.
+/// Reports are sent to the Worker HTTP endpoint and persisted in D1 without
+/// waking the control Durable Object. Values below 5s are ignored; the panel
+/// treats an agent as offline after three missed reports at the default cadence.
 fn status_interval() -> Duration {
     let secs = std::env::var("STATUS_INTERVAL_SECS")
         .ok()
@@ -195,6 +194,49 @@ fn build_ws_url(cfg: &RunConfig) -> Result<String> {
     Ok(ws.to_string())
 }
 
+fn build_report_url(cfg: &RunConfig) -> Result<String> {
+    let mut url = Url::parse(&cfg.hub_base).context("invalid hub URL")?;
+    url.set_path("/api/agent/report");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.query_pairs_mut()
+        .append_pair("instance", &cfg.instance_id);
+    Ok(url.to_string())
+}
+
+fn send_status_report(cfg: &RunConfig, status: AgentToHub, reported_at: u64) -> Result<()> {
+    let url = build_report_url(cfg)?;
+    let authorization = format!("Bearer {}", cfg.agent_token);
+    let result = ureq::post(&url)
+        .timeout(Duration::from_secs(20))
+        .set("authorization", &authorization)
+        .send_json(serde_json::json!({
+            "reportedAt": reported_at,
+            "status": status,
+        }));
+    match result {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            bail!("status report rejected ({code}): {}", body.trim())
+        }
+        Err(error) => bail!("status report request failed: {error}"),
+    }
+}
+
+fn spawn_status_report(cfg: RunConfig, status: AgentToHub) {
+    let reported_at = now_ms();
+    tokio::spawn(async move {
+        match tokio::task::spawn_blocking(move || send_status_report(&cfg, status, reported_at))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("could not report status: {error:#}"),
+            Err(error) => tracing::warn!("status report task failed: {error}"),
+        }
+    });
+}
+
 async fn run_daemon() -> Result<()> {
     // Route all tracing (agent + embedded rathole) into a channel for streaming.
     // Service status is reported directly from the runner's typed config/state.
@@ -233,14 +275,17 @@ async fn run_daemon() -> Result<()> {
         });
     }
 
-    // Periodic status + metrics + per-service online state.
+    // Periodic status + metrics + per-service online state. Reports go to the
+    // stateless Worker endpoint and D1, never through the control WebSocket/DO.
     {
-        let to_hub_tx = to_hub_tx.clone();
+        let cfg = cfg.clone();
         let runner = runner.clone();
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
-            let mut ticker = tokio::time::interval(status_interval());
+            let interval = status_interval();
+            let mut ticker =
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
             loop {
                 ticker.tick().await;
                 let mut guard = runner.lock().await;
@@ -264,9 +309,7 @@ async fn run_daemon() -> Result<()> {
                     service_status: statuses,
                     traffic,
                 };
-                if let Ok(text) = serde_json::to_string(&msg) {
-                    let _ = to_hub_tx.send(text);
-                }
+                spawn_status_report(cfg.clone(), msg);
             }
         });
     }
@@ -319,7 +362,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        handle_hub_message(&text, runner, to_hub_tx).await;
+                        handle_hub_message(&text, cfg, runner, to_hub_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
@@ -341,6 +384,7 @@ async fn connect_once(
 
 async fn handle_hub_message(
     text: &str,
+    cfg: &RunConfig,
     runner: &Arc<Mutex<Runner>>,
     to_hub_tx: &mpsc::UnboundedSender<String>,
 ) {
@@ -361,6 +405,19 @@ async fn handle_hub_message(
     match msg {
         HubToAgent::Registered { name, .. } => {
             tracing::info!(%name, "hub acknowledged registration");
+            // The WebSocket upgrade has already seeded the D1 credential. Send
+            // one snapshot immediately so a newly connected agent is not
+            // considered online merely because its control socket exists.
+            let mut guard = runner.lock().await;
+            guard.refresh().await;
+            let status = AgentToHub::Status {
+                process_state: guard.state(),
+                metrics: None,
+                service_status: guard.service_status(),
+                traffic: guard.traffic(),
+            };
+            drop(guard);
+            spawn_status_report(cfg.clone(), status);
         }
         HubToAgent::ApplyConfig {
             config,
@@ -419,12 +476,15 @@ async fn handle_hub_message(
                 ok: result.is_ok(),
                 error: result.err().map(|e| format!("{e:#}")),
             });
-            reply(AgentToHub::Status {
-                process_state: state,
-                metrics: None,
-                service_status: statuses,
-                traffic,
-            });
+            spawn_status_report(
+                cfg.clone(),
+                AgentToHub::Status {
+                    process_state: state,
+                    metrics: None,
+                    service_status: statuses,
+                    traffic,
+                },
+            );
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),
         HubToAgent::Error { message } => {
@@ -460,5 +520,15 @@ mod tests {
     fn ws_url_uses_ws_for_http() {
         let url = build_ws_url(&cfg("http://127.0.0.1:8787")).unwrap();
         assert!(url.starts_with("ws://127.0.0.1:8787/api/agent/ws?"));
+    }
+
+    #[test]
+    fn report_url_uses_http_and_carries_only_the_instance_id() {
+        let url = build_report_url(&cfg("https://panel.example.com/base")).unwrap();
+        assert_eq!(
+            url,
+            "https://panel.example.com/api/agent/report?instance=abc"
+        );
+        assert!(!url.contains("tok"));
     }
 }

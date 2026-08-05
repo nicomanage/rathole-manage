@@ -55,6 +55,9 @@ function run(command, args) {
 
 run(process.execPath, [npmCli, "test"]);
 run(process.execPath, [npmCli, "run", "build"]);
+if (!isDryRun) {
+  run(process.execPath, [npmCli, "run", "db:migrate:remote"]);
+}
 run(process.execPath, [
   npmCli,
   "exec",
