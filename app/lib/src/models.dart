@@ -55,6 +55,7 @@ class RatholeService {
   String bindAddr;
   List<String>? httpHosts;
   String? httpHost;
+  CustomCertificateConfig? customCertificate;
   String? token;
   bool? nodelay;
 
@@ -64,6 +65,7 @@ class RatholeService {
     required this.bindAddr,
     this.httpHosts,
     this.httpHost,
+    this.customCertificate,
     this.token,
     this.nodelay,
   });
@@ -74,6 +76,10 @@ class RatholeService {
         bindAddr: json['bindAddr'] as String? ?? '',
         httpHosts: (json['httpHosts'] as List?)?.cast<String>(),
         httpHost: json['httpHost'] as String?,
+        customCertificate: json['customCertificate'] == null
+            ? null
+            : CustomCertificateConfig.fromJson(
+                json['customCertificate'] as Map<String, dynamic>),
         token: json['token'] as String?,
         nodelay: json['nodelay'] as bool?,
       );
@@ -84,6 +90,8 @@ class RatholeService {
         'bindAddr': bindAddr,
         if (httpHosts != null) 'httpHosts': httpHosts,
         if (httpHost != null) 'httpHost': httpHost,
+        if (customCertificate != null)
+          'customCertificate': customCertificate!.toJson(),
         if (token != null) 'token': token,
         if (nodelay != null) 'nodelay': nodelay,
       };

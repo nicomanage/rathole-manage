@@ -20,6 +20,8 @@ export interface RatholeService {
   httpHosts?: string[];
   /** Legacy single-host field, migrated to `httpHosts` during normalization. */
   httpHost?: string;
+  /** Optional HTTPS certificate served for this backend's HTTP hosts. */
+  customCertificate?: CustomCertificateConfig;
   /** Optional per-service token; falls back to the instance default token. */
   token?: string;
   nodelay?: boolean;
@@ -34,7 +36,7 @@ export interface HttpProxyConfig {
   httpsBindAddr?: string;
   /** Optional Let's Encrypt automation for HTTPS virtual hosts. */
   letsEncrypt?: LetsEncryptConfig;
-  /** Optional operator-provided PEM certificate chain and private key. */
+  /** Legacy global certificate; migrated to each HTTP backend during normalization. */
   customCertificate?: CustomCertificateConfig;
 }
 

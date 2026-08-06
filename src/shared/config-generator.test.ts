@@ -236,14 +236,19 @@ describe("validateConfig", () => {
             enabled: true,
             bindAddr: HTTP_PROXY_BIND_ADDR,
             httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
-            customCertificate: {
-              enabled: true,
-              certificatePem: "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
-              privateKeyPem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
-            },
           },
           services: [
-            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+            {
+              name: "web",
+              type: "tcp",
+              bindAddr: "0.0.0.0:8080",
+              httpHost: "app.example.com",
+              customCertificate: {
+                enabled: true,
+                certificatePem: "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
+                privateKeyPem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+              },
+            },
           ],
         }),
       ),
@@ -253,37 +258,76 @@ describe("validateConfig", () => {
   it("requires both custom certificate PEM fields", () => {
     const issues = validateConfig(
       config({
-        http: {
-          enabled: true,
-          bindAddr: HTTP_PROXY_BIND_ADDR,
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [{
+          name: "web",
+          type: "tcp",
+          bindAddr: "0.0.0.0:8080",
+          httpHost: "app.example.com",
           customCertificate: { enabled: true, certificatePem: "", privateKeyPem: "" },
-        },
+        }],
       }),
     );
     expect(issues.map((issue) => issue.path)).toContain(
-      "http.customCertificate.certificatePem",
+      "services[0].customCertificate.certificatePem",
     );
     expect(issues.map((issue) => issue.path)).toContain(
-      "http.customCertificate.privateKeyPem",
+      "services[0].customCertificate.privateKeyPem",
     );
   });
 
-  it("rejects enabling Let's Encrypt and a custom certificate together", () => {
+  it("allows Let's Encrypt and per-backend custom certificates together", () => {
     const issues = validateConfig(
       config({
         http: {
           enabled: true,
           bindAddr: HTTP_PROXY_BIND_ADDR,
           letsEncrypt: { enabled: true, email: "admin@example.com" },
-          customCertificate: {
-            enabled: true,
-            certificatePem: "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
-            privateKeyPem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
-          },
         },
+        services: [
+          {
+            name: "custom",
+            type: "tcp",
+            bindAddr: "0.0.0.0:8080",
+            httpHost: "custom.example.com",
+            customCertificate: {
+              enabled: true,
+              certificatePem: "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
+              privateKeyPem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+            },
+          },
+          { name: "acme", type: "tcp", bindAddr: "0.0.0.0:8081", httpHost: "acme.example.com" },
+        ],
       }),
     );
-    expect(issues.some((issue) => issue.path === "http.customCertificate.enabled")).toBe(true);
+    expect(issues).toEqual([]);
+  });
+
+  it("migrates a legacy global custom certificate to every HTTP backend", () => {
+    const normalized = normalizeConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          customCertificate: {
+            enabled: true,
+            certificatePem: " cert ",
+            privateKeyPem: " key ",
+          },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+          { name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22" },
+        ],
+      }),
+    );
+    expect(normalized.http?.customCertificate).toBeUndefined();
+    expect(normalized.services[0].customCertificate).toEqual({
+      enabled: true,
+      certificatePem: "cert",
+      privateKeyPem: "key",
+    });
+    expect(normalized.services[1].customCertificate).toBeUndefined();
   });
 
   it("normalizes proxy binds to fixed IPv6 wildcard ports", () => {

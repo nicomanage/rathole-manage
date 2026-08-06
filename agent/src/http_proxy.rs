@@ -9,6 +9,7 @@ pub struct HttpRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomCertificateConfig {
+    pub hosts: Vec<String>,
     pub certificate_pem: String,
     pub private_key_pem: String,
 }
@@ -18,7 +19,7 @@ pub struct HttpProxyConfig {
     pub bind_addr: String,
     pub https_bind_addr: Option<String>,
     pub lets_encrypt: Option<LetsEncryptConfig>,
-    pub custom_certificate: Option<CustomCertificateConfig>,
+    pub custom_certificates: Vec<CustomCertificateConfig>,
     pub https_hosts: Vec<String>,
     pub routes: Vec<HttpRoute>,
 }
@@ -31,6 +32,8 @@ mod imp {
     use async_trait::async_trait;
     use bytes::Bytes;
     use pingora::http::ResponseHeader;
+    use pingora::listeners::tls::TlsSettings;
+    use pingora::listeners::TlsAccept;
     use pingora::prelude::{
         ConnectError, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult, Server,
         Session,
@@ -41,12 +44,16 @@ mod imp {
     use pingora::protocols::Stream as PingoraIoStream;
     use pingora::proxy::{http_proxy_service_with_name_custom, ProcessCustomSession};
     use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
+    use pingora::tls::ext;
+    use pingora::tls::pkey::{PKey, Private};
+    use pingora::tls::ssl::{NameType, SslRef};
+    use pingora::tls::x509::X509;
     use pingora::upstreams::peer::Peer;
     use std::collections::HashMap;
+    use std::fs;
     use std::future::Future;
     use std::net::TcpListener;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::path::Path;
     use std::pin::Pin;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
     use std::sync::{Arc, RwLock};
@@ -286,10 +293,16 @@ mod imp {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CertificateBinding {
+        hosts: Vec<String>,
+        certificate: CertificatePaths,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct RuntimeConfig {
         bind_addr: String,
         https_bind_addr: Option<String>,
-        certificate: Option<CertificatePaths>,
+        certificates: Vec<CertificateBinding>,
     }
 
     impl RuntimeConfig {
@@ -297,7 +310,7 @@ mod imp {
             Self {
                 bind_addr: bind_addr.into(),
                 https_bind_addr: None,
-                certificate: None,
+                certificates: Vec::new(),
             }
         }
     }
@@ -338,30 +351,32 @@ mod imp {
             self.set_routes(&config.routes);
             let mut runtime = RuntimeConfig::http_only(config.bind_addr.clone());
 
-            if config.lets_encrypt.is_some() && config.custom_certificate.is_some() {
-                bail!("choose either Let's Encrypt or a custom certificate, not both");
-            }
-
             if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
                 self.ensure_http_listener(&config.bind_addr).await?;
                 let domains = route_domains(&config.https_hosts);
-                if domains.is_empty() {
-                    self.ensure_running(runtime).await?;
-                    return Ok(());
+                if !domains.is_empty() {
+                    let issuer = AcmeIssuer::new(self.shared.challenges.clone());
+                    let certificate = issuer
+                        .ensure_certificate(lets_encrypt, &domains)
+                        .await
+                        .context("ensuring Let's Encrypt certificate")?;
+                    runtime.certificates.push(CertificateBinding {
+                        hosts: domains,
+                        certificate,
+                    });
                 }
-                let issuer = AcmeIssuer::new(self.shared.challenges.clone());
-                let certificate = issuer
-                    .ensure_certificate(lets_encrypt, &domains)
-                    .await
-                    .context("ensuring Let's Encrypt certificate")?;
-                runtime.https_bind_addr = config.https_bind_addr.clone();
-                runtime.certificate = Some(certificate);
-            } else if let Some(custom) = config.custom_certificate.as_ref() {
+            }
+            for custom in &config.custom_certificates {
                 let certificate =
                     store_custom_certificate(&custom.certificate_pem, &custom.private_key_pem)
                         .context("storing custom HTTPS certificate")?;
+                runtime.certificates.push(CertificateBinding {
+                    hosts: route_domains(&custom.hosts),
+                    certificate,
+                });
+            }
+            if !runtime.certificates.is_empty() {
                 runtime.https_bind_addr = config.https_bind_addr.clone();
-                runtime.certificate = Some(certificate);
             }
 
             self.ensure_running(runtime).await?;
@@ -527,14 +542,12 @@ mod imp {
             on_custom,
         );
         service.add_tcp(&config.bind_addr);
-        if let (Some(https_bind_addr), Some(certificate)) =
-            (config.https_bind_addr.as_ref(), config.certificate.as_ref())
-        {
-            let cert_path = path_to_str(&certificate.cert_path)?;
-            let key_path = path_to_str(&certificate.key_path)?;
-            service
-                .add_tls(https_bind_addr, cert_path, key_path)
-                .map_err(|e| format!("{e:#}"))?;
+        if let Some(https_bind_addr) = config.https_bind_addr.as_ref() {
+            let dynamic_certificates = DynamicCertificates::load(&config.certificates)?;
+            let mut tls_settings = TlsSettings::with_callbacks(Box::new(dynamic_certificates))
+                .map_err(|e| format!("creating TLS settings: {e:#}"))?;
+            tls_settings.enable_h2();
+            service.add_tls_with_settings(https_bind_addr, None, tls_settings);
         }
         server.add_service(service);
         server.run(RunArgs {
@@ -544,9 +557,84 @@ mod imp {
         Ok(())
     }
 
-    fn path_to_str(path: &Path) -> std::result::Result<&str, String> {
-        path.to_str()
-            .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))
+    struct LoadedCertificate {
+        hosts: Vec<String>,
+        chain: Vec<X509>,
+        private_key: PKey<Private>,
+    }
+
+    struct DynamicCertificates {
+        certificates: Vec<LoadedCertificate>,
+    }
+
+    impl DynamicCertificates {
+        fn load(bindings: &[CertificateBinding]) -> std::result::Result<Self, String> {
+            let certificates = bindings
+                .iter()
+                .map(|binding| {
+                    let certificate_pem =
+                        fs::read(&binding.certificate.cert_path).map_err(|e| {
+                            format!(
+                                "reading certificate {}: {e}",
+                                binding.certificate.cert_path.display()
+                            )
+                        })?;
+                    let chain = X509::stack_from_pem(&certificate_pem)
+                        .map_err(|e| format!("parsing certificate chain: {e:#}"))?;
+                    if chain.is_empty() {
+                        return Err("certificate chain contains no certificates".into());
+                    }
+                    let private_key_pem = fs::read(&binding.certificate.key_path).map_err(|e| {
+                        format!(
+                            "reading private key {}: {e}",
+                            binding.certificate.key_path.display()
+                        )
+                    })?;
+                    let private_key = PKey::private_key_from_pem(&private_key_pem)
+                        .map_err(|e| format!("parsing certificate private key: {e:#}"))?;
+                    Ok(LoadedCertificate {
+                        hosts: route_domains(&binding.hosts),
+                        chain,
+                        private_key,
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, String>>()?;
+            if certificates.is_empty() {
+                return Err("HTTPS listener requires at least one certificate".into());
+            }
+            Ok(Self { certificates })
+        }
+    }
+
+    #[async_trait]
+    impl TlsAccept for DynamicCertificates {
+        async fn certificate_callback(&self, ssl: &mut SslRef) {
+            let sni = ssl
+                .servername(NameType::HOST_NAME)
+                .map(normalize_route_host);
+            let certificate = sni
+                .as_ref()
+                .and_then(|host| {
+                    self.certificates
+                        .iter()
+                        .find(|certificate| certificate.hosts.contains(host))
+                })
+                .or_else(|| self.certificates.first());
+            let Some(certificate) = certificate else {
+                return;
+            };
+            let result = (|| {
+                ext::ssl_use_certificate(ssl, &certificate.chain[0])?;
+                ext::ssl_use_private_key(ssl, &certificate.private_key)?;
+                for intermediate in certificate.chain.iter().skip(1) {
+                    ext::ssl_add_chain_cert(ssl, intermediate)?;
+                }
+                Ok::<_, pingora::tls::error::ErrorStack>(())
+            })();
+            if let Err(error) = result {
+                tracing::error!(sni = ?sni, ?error, "failed to select HTTPS certificate");
+            }
+        }
     }
 
     async fn respond_text(session: &mut Session, status: u16, value: String) -> PingoraResult<()> {

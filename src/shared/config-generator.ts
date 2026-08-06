@@ -69,9 +69,12 @@ export function serviceHttpHosts(service: RatholeService): string[] {
 export function normalizeConfig(config: RatholeConfig): RatholeConfig {
   const legacyServices = config.services as LegacyRatholeService[];
   const legacyDomain = legacyServices.find((service) => service.domain?.trim())?.domain;
+  const legacyCustomCertificate = config.http?.customCertificate;
   const services = legacyServices.map(({ domain: _domain, ...service }, i) => {
     const httpHosts = serviceHttpHosts(service);
     const legacyHttpService = isHttpService(service);
+    const customCertificate = service.customCertificate ??
+      (httpHosts.length > 0 ? legacyCustomCertificate : undefined);
     return {
       ...service,
       // HTTP routing is an overlay on a real TCP service. Migrate the former
@@ -80,6 +83,13 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
       bindAddr: legacyHttpService ? restorePublicBindAddr(service, i) : service.bindAddr,
       httpHost: undefined,
       httpHosts: httpHosts.length > 0 ? httpHosts : undefined,
+      customCertificate: customCertificate
+        ? {
+            enabled: !!customCertificate.enabled,
+            certificatePem: customCertificate.certificatePem?.trim() || "",
+            privateKeyPem: customCertificate.privateKeyPem?.trim() || "",
+          }
+        : undefined,
     };
   });
 
@@ -98,13 +108,7 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
                 staging: !!config.http.letsEncrypt.staging,
               }
             : undefined,
-          customCertificate: config.http.customCertificate
-            ? {
-                enabled: !!config.http.customCertificate.enabled,
-                certificatePem: config.http.customCertificate.certificatePem?.trim() || "",
-                privateKeyPem: config.http.customCertificate.privateKeyPem?.trim() || "",
-              }
-            : undefined,
+          customCertificate: undefined,
         }
       : undefined,
     services,
@@ -212,38 +216,18 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
 
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
-  const customCertificateEnabled = !!config.http?.customCertificate?.enabled;
   const httpRoutes = config.services.filter(hasHttpRoute);
-  const letsEncryptActive = letsEncryptEnabled && httpRoutes.length > 0;
-  const customCertificateActive = customCertificateEnabled && httpRoutes.length > 0;
+  const letsEncryptActive = letsEncryptEnabled &&
+    httpRoutes.some((service) => !service.customCertificate?.enabled);
+  const customCertificateActive = httpRoutes.some(
+    (service) => !!service.customCertificate?.enabled,
+  );
   if (httpEnabled || httpRoutes.length > 0) {
     const httpBindAddr = config.http?.bindAddr?.trim() || HTTP_PROXY_BIND_ADDR;
     if (httpBindAddr !== HTTP_PROXY_BIND_ADDR) {
       issues.push({
         path: "http.bindAddr",
         message: `HTTP proxy always listens on ${HTTP_PROXY_BIND_ADDR}.`,
-      });
-    }
-  }
-  if (letsEncryptEnabled && customCertificateEnabled) {
-    issues.push({
-      path: "http.customCertificate.enabled",
-      message: "Choose either Let's Encrypt or a custom certificate, not both.",
-    });
-  }
-  if (customCertificateEnabled) {
-    const certificatePem = config.http?.customCertificate?.certificatePem?.trim() || "";
-    const privateKeyPem = config.http?.customCertificate?.privateKeyPem?.trim() || "";
-    if (!certificatePem.includes("-----BEGIN CERTIFICATE-----")) {
-      issues.push({
-        path: "http.customCertificate.certificatePem",
-        message: "Custom certificate must contain a PEM certificate chain.",
-      });
-    }
-    if (!/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(privateKeyPem)) {
-      issues.push({
-        path: "http.customCertificate.privateKeyPem",
-        message: "Custom certificate must contain a PEM private key.",
       });
     }
   }
@@ -277,6 +261,27 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
 
     const httpHosts = serviceHttpHosts(svc);
+    const customCertificate = svc.customCertificate;
+    if (customCertificate?.enabled) {
+      if (httpHosts.length === 0) {
+        issues.push({
+          path: `${base}.customCertificate.enabled`,
+          message: `Service "${svc.name || i}" needs at least one HTTP host before enabling a custom certificate.`,
+        });
+      }
+      if (!customCertificate.certificatePem.trim().includes("-----BEGIN CERTIFICATE-----")) {
+        issues.push({
+          path: `${base}.customCertificate.certificatePem`,
+          message: `Service "${svc.name || i}" custom certificate must contain a PEM certificate chain.`,
+        });
+      }
+      if (!/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(customCertificate.privateKeyPem.trim())) {
+        issues.push({
+          path: `${base}.customCertificate.privateKeyPem`,
+          message: `Service "${svc.name || i}" custom certificate must contain a PEM private key.`,
+        });
+      }
+    }
     if (httpHosts.length > 0) {
       if (svc.type === "udp") {
         issues.push({
@@ -330,11 +335,6 @@ export function defaultConfig(): RatholeConfig {
         enabled: false,
         email: "",
         staging: false,
-      },
-      customCertificate: {
-        enabled: false,
-        certificatePem: "",
-        privateKeyPem: "",
       },
     },
     services: [],

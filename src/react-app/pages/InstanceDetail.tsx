@@ -396,7 +396,9 @@ function ConfigEditor({
       services[i] = {
         ...previous,
         type,
-        ...(type === "udp" ? { httpHost: undefined, httpHosts: undefined } : {}),
+        ...(type === "udp"
+          ? { httpHost: undefined, httpHosts: undefined, customCertificate: undefined }
+          : {}),
       };
       return normalizeConfig({ ...c, services });
     });
@@ -411,11 +413,6 @@ function ConfigEditor({
         http: {
           enabled,
           letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
-          customCertificate: c.http?.customCertificate ?? {
-            enabled: false,
-            certificatePem: "",
-            privateKeyPem: "",
-          },
           ...rest,
           bindAddr: HTTP_PROXY_BIND_ADDR,
           httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
@@ -437,43 +434,34 @@ function ConfigEditor({
           bindAddr: HTTP_PROXY_BIND_ADDR,
           httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
           letsEncrypt: next,
-          customCertificate: next.enabled
-            ? {
-                enabled: false,
-                certificatePem: c.http?.customCertificate?.certificatePem ?? "",
-                privateKeyPem: c.http?.customCertificate?.privateKeyPem ?? "",
-              }
-            : c.http?.customCertificate,
         },
       };
     });
   }
 
-  function updateCustomCertificate(
-    p: Partial<NonNullable<HttpProxyConfig["customCertificate"]>>,
+  function updateServiceCustomCertificate(
+    i: number,
+    p: Partial<NonNullable<RatholeService["customCertificate"]>>,
   ) {
     setConfig((c) => {
-      const current = c.http?.customCertificate ?? {
+      const services = c.services.slice();
+      const service = services[i];
+      const current = service.customCertificate ?? {
         enabled: false,
         certificatePem: "",
         privateKeyPem: "",
       };
       const next = { ...current, ...p };
+      services[i] = { ...service, customCertificate: next };
       return {
         ...c,
         http: {
           enabled: next.enabled ? true : (c.http?.enabled ?? false),
           bindAddr: HTTP_PROXY_BIND_ADDR,
           httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
-          letsEncrypt: next.enabled
-            ? {
-                enabled: false,
-                email: c.http?.letsEncrypt?.email ?? "",
-                staging: c.http?.letsEncrypt?.staging ?? false,
-              }
-            : c.http?.letsEncrypt,
-          customCertificate: next,
+          letsEncrypt: c.http?.letsEncrypt ?? { enabled: false, email: "", staging: false },
         },
+        services,
       };
     });
   }
@@ -587,6 +575,7 @@ function ConfigEditor({
                   ) : (
                     <TableHead className="min-w-40">Public bind (server)</TableHead>
                   )}
+                  {httpPanel && <TableHead className="min-w-80">HTTPS certificate</TableHead>}
                   {!httpPanel && (
                     <>
                       <TableHead className="min-w-36">Token</TableHead>
@@ -603,6 +592,15 @@ function ConfigEditor({
                   const httpHostIssue =
                     issueByPath.get(`services[${i}].httpHosts`) ??
                     issueByPath.get(`services[${i}].httpHost`);
+                  const certificateEnabledIssue = issueByPath.get(
+                    `services[${i}].customCertificate.enabled`,
+                  );
+                  const certificatePemIssue = issueByPath.get(
+                    `services[${i}].customCertificate.certificatePem`,
+                  );
+                  const privateKeyPemIssue = issueByPath.get(
+                    `services[${i}].customCertificate.privateKeyPem`,
+                  );
                   return (
                     <TableRow key={i} className="align-top">
                       <TableCell className="text-center">
@@ -673,6 +671,65 @@ function ConfigEditor({
                           </>
                         )}
                       </TableCell>
+                      {httpPanel && (
+                        <TableCell className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <Label>Custom certificate</Label>
+                            <Switch
+                              checked={!!svc.customCertificate?.enabled}
+                              disabled={!canEdit}
+                              onCheckedChange={(enabled) =>
+                                updateServiceCustomCertificate(i, { enabled })
+                              }
+                            />
+                          </div>
+                          {certificateEnabledIssue && (
+                            <p className="text-xs text-destructive">{certificateEnabledIssue}</p>
+                          )}
+                          {svc.customCertificate?.enabled && (
+                            <>
+                              <Textarea
+                                aria-label={`${svc.name} certificate chain`}
+                                aria-invalid={!!certificatePemIssue}
+                                className={cn(
+                                  "min-h-28 font-mono text-xs",
+                                  certificatePemIssue && "border-destructive",
+                                )}
+                                placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                                value={svc.customCertificate.certificatePem}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  updateServiceCustomCertificate(i, {
+                                    certificatePem: e.target.value,
+                                  })
+                                }
+                              />
+                              {certificatePemIssue && (
+                                <p className="text-xs text-destructive">{certificatePemIssue}</p>
+                              )}
+                              <Textarea
+                                aria-label={`${svc.name} private key`}
+                                aria-invalid={!!privateKeyPemIssue}
+                                className={cn(
+                                  "min-h-28 font-mono text-xs",
+                                  privateKeyPemIssue && "border-destructive",
+                                )}
+                                placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                                value={svc.customCertificate.privateKeyPem}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  updateServiceCustomCertificate(i, {
+                                    privateKeyPem: e.target.value,
+                                  })
+                                }
+                              />
+                              {privateKeyPemIssue && (
+                                <p className="text-xs text-destructive">{privateKeyPemIssue}</p>
+                              )}
+                            </>
+                          )}
+                        </TableCell>
+                      )}
                       {!httpPanel && (
                         <>
                           <TableCell>
@@ -849,21 +906,6 @@ function ConfigEditor({
                   onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
                 />
               </div>
-              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-                <div>
-                  <Label>Custom certificate</Label>
-                  {issueByPath.has("http.customCertificate.enabled") && (
-                    <p className="mt-1 text-xs text-destructive">
-                      {issueByPath.get("http.customCertificate.enabled")}
-                    </p>
-                  )}
-                </div>
-                <Switch
-                  checked={!!config.http?.customCertificate?.enabled}
-                  disabled={!canEdit}
-                  onCheckedChange={(enabled) => updateCustomCertificate({ enabled })}
-                />
-              </div>
               <div className="space-y-2">
                 <Label>ACME email</Label>
                 <Input
@@ -873,46 +915,6 @@ function ConfigEditor({
                   disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
                   onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
                 />
-              </div>
-              <div className="space-y-2 sm:col-span-2">
-                <Label>Certificate chain (PEM)</Label>
-                <Textarea
-                  aria-invalid={issueByPath.has("http.customCertificate.certificatePem")}
-                  className={cn(
-                    "min-h-40 font-mono text-xs",
-                    issueByPath.has("http.customCertificate.certificatePem") &&
-                      "border-destructive",
-                  )}
-                  placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
-                  value={config.http?.customCertificate?.certificatePem ?? ""}
-                  disabled={!canEdit || !config.http?.customCertificate?.enabled}
-                  onChange={(e) => updateCustomCertificate({ certificatePem: e.target.value })}
-                />
-                {issueByPath.has("http.customCertificate.certificatePem") && (
-                  <p className="text-xs text-destructive">
-                    {issueByPath.get("http.customCertificate.certificatePem")}
-                  </p>
-                )}
-              </div>
-              <div className="space-y-2 sm:col-span-2">
-                <Label>Private key (PEM)</Label>
-                <Textarea
-                  aria-invalid={issueByPath.has("http.customCertificate.privateKeyPem")}
-                  className={cn(
-                    "min-h-40 font-mono text-xs",
-                    issueByPath.has("http.customCertificate.privateKeyPem") &&
-                      "border-destructive",
-                  )}
-                  placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
-                  value={config.http?.customCertificate?.privateKeyPem ?? ""}
-                  disabled={!canEdit || !config.http?.customCertificate?.enabled}
-                  onChange={(e) => updateCustomCertificate({ privateKeyPem: e.target.value })}
-                />
-                {issueByPath.has("http.customCertificate.privateKeyPem") && (
-                  <p className="text-xs text-destructive">
-                    {issueByPath.get("http.customCertificate.privateKeyPem")}
-                  </p>
-                )}
               </div>
             </CardContent>
           </Card>

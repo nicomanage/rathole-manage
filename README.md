@@ -167,17 +167,19 @@ and `AGENT_TOKEN` in the environment instead (see `agent/agent.env.example`).
 Each instance has a control channel (`bind_addr`, an optional operator-facing
 domain, an auto-generated `default_token`, transport: `tcp` / `tls` / `noise` /
 `websocket`), optional HTTP proxy settings (`http.enabled`,
-`http.letsEncrypt`, `http.customCertificate`), and a list of services. A service maps a public `bind_addr`
-on the server and can optionally set `httpHost`. When `httpHost` is set on a TCP
+`http.letsEncrypt`), and a list of services. A service maps a public `bind_addr`
+on the server and can optionally set `httpHosts` and `customCertificate`. When an HTTP host is set on a TCP
 service and the HTTP proxy is enabled, Pingora listens on fixed IPv6 wildcard
 addresses `[::]:80` and, with Let's Encrypt enabled, `[::]:443`; it matches the
 request Host and reverse-proxies to that service's rathole public bind address.
 If `http.letsEncrypt.enabled` is true, the agent uses HTTP-01 validation, so port
 80 must be reachable for every configured HTTP host; certificates are renewed
-when they have fewer than 30 days remaining. As an alternative, enable
-`http.customCertificate` and provide a PEM certificate chain and matching
-unencrypted PEM private key. The two certificate sources are mutually exclusive;
-the agent validates the pair and stores the private key with mode `0600`.
+when they have fewer than 30 days remaining. A backend can instead enable its
+own `customCertificate` and provide a PEM certificate chain and matching
+unencrypted PEM private key. Custom certificates override Let's Encrypt only
+for that backend; the Agent selects certificates by TLS SNI, validates each
+pair, and stores private keys with mode `0600`. Legacy global custom certificate
+settings are migrated to every configured HTTP backend.
 Client-side `local_addr` and `client.toml` are managed outside this panel. The
 Worker sends the server-side model to the agent as structured JSON; the agent
 converts it to rathole's typed config and calls the patched embedded API

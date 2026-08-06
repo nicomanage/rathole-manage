@@ -400,8 +400,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
   late TextEditingController _domain;
   late TextEditingController _heartbeat;
   late TextEditingController _acmeEmail;
-  late TextEditingController _certificatePem;
-  late TextEditingController _privateKeyPem;
   final List<_ServiceControllers> _serviceControllers = [];
 
   @override
@@ -431,10 +429,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
         text: _config.heartbeatInterval?.toString() ?? '');
     _acmeEmail =
         TextEditingController(text: _config.http?.letsEncrypt?.email ?? '');
-    _certificatePem = TextEditingController(
-        text: _config.http?.customCertificate?.certificatePem ?? '');
-    _privateKeyPem = TextEditingController(
-        text: _config.http?.customCertificate?.privateKeyPem ?? '');
     _serviceControllers.clear();
     for (final svc in _config.services) {
       _serviceControllers.add(_ServiceControllers.from(svc));
@@ -447,8 +441,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
     _domain.dispose();
     _heartbeat.dispose();
     _acmeEmail.dispose();
-    _certificatePem.dispose();
-    _privateKeyPem.dispose();
     for (final c in _serviceControllers) {
       c.dispose();
     }
@@ -492,23 +484,20 @@ class _ConfigEditorState extends State<ConfigEditor> {
       http.letsEncrypt!.enabled = enabled;
       if (enabled) {
         http.enabled = true;
-        http.customCertificate ??= CustomCertificateConfig();
-        http.customCertificate!.enabled = false;
       }
       http.bindAddr = httpProxyBindAddr;
       http.httpsBindAddr = httpsProxyBindAddr;
     });
   }
 
-  void _setCustomCertificateEnabled(bool enabled) {
+  void _setServiceCustomCertificateEnabled(int i, bool enabled) {
     setState(() {
+      final service = _config.services[i];
+      service.customCertificate ??= CustomCertificateConfig();
+      service.customCertificate!.enabled = enabled;
       final http = _ensureHttp();
-      http.customCertificate ??= CustomCertificateConfig();
-      http.customCertificate!.enabled = enabled;
       if (enabled) {
         http.enabled = true;
-        http.letsEncrypt ??= LetsEncryptConfig();
-        http.letsEncrypt!.enabled = false;
       }
       http.bindAddr = httpProxyBindAddr;
       http.httpsBindAddr = httpsProxyBindAddr;
@@ -522,8 +511,11 @@ class _ConfigEditorState extends State<ConfigEditor> {
       if (type == 'udp') {
         svc
           ..httpHost = null
-          ..httpHosts = null;
+          ..httpHosts = null
+          ..customCertificate = null;
         _serviceControllers[i].httpHosts.text = '';
+        _serviceControllers[i].certificatePem.text = '';
+        _serviceControllers[i].privateKeyPem.text = '';
       }
       _config = normalizeConfig(_config);
     });
@@ -746,15 +738,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
               enabled: canEdit,
               onChanged: _setLetsEncryptEnabled,
             ),
-            const SizedBox(height: 12),
-            _switchRow(
-              label: 'Custom certificate',
-              icon: LucideIcons.keyRound,
-              value: http?.customCertificate?.enabled ?? false,
-              enabled: canEdit,
-              error: issueByPath['http.customCertificate.enabled'],
-              onChanged: _setCustomCertificateEnabled,
-            ),
             const SizedBox(height: 16),
             Field(
               label: 'ACME email',
@@ -769,46 +752,6 @@ class _ConfigEditorState extends State<ConfigEditor> {
                   final h = _ensureHttp();
                   h.letsEncrypt ??= LetsEncryptConfig();
                   h.letsEncrypt!.email = v;
-                }),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Field(
-              label: 'Certificate chain (PEM)',
-              error: issueByPath['http.customCertificate.certificatePem'],
-              child: ShadInput(
-                controller: _certificatePem,
-                enabled:
-                    canEdit && (http?.customCertificate?.enabled ?? false),
-                autocorrect: false,
-                minLines: 5,
-                maxLines: 10,
-                placeholder: const Text('-----BEGIN CERTIFICATE-----\n...'),
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                onChanged: (v) => setState(() {
-                  final h = _ensureHttp();
-                  h.customCertificate ??= CustomCertificateConfig();
-                  h.customCertificate!.certificatePem = v;
-                }),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Field(
-              label: 'Private key (PEM)',
-              error: issueByPath['http.customCertificate.privateKeyPem'],
-              child: ShadInput(
-                controller: _privateKeyPem,
-                enabled:
-                    canEdit && (http?.customCertificate?.enabled ?? false),
-                autocorrect: false,
-                minLines: 5,
-                maxLines: 10,
-                placeholder: const Text('-----BEGIN PRIVATE KEY-----\n...'),
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                onChanged: (v) => setState(() {
-                  final h = _ensureHttp();
-                  h.customCertificate ??= CustomCertificateConfig();
-                  h.customCertificate!.privateKeyPem = v;
                 }),
               ),
             ),
@@ -1032,6 +975,60 @@ class _ConfigEditorState extends State<ConfigEditor> {
                   }),
                 ),
               ),
+              const SizedBox(height: 12),
+              _switchRow(
+                label: 'Custom certificate',
+                icon: LucideIcons.keyRound,
+                value: svc.customCertificate?.enabled ?? false,
+                enabled: canEdit,
+                error: issueByPath['services[$i].customCertificate.enabled'],
+                onChanged: (enabled) =>
+                    _setServiceCustomCertificateEnabled(i, enabled),
+              ),
+              if (svc.customCertificate?.enabled == true) ...[
+                const SizedBox(height: 12),
+                Field(
+                  label: 'Certificate chain (PEM)',
+                  error: issueByPath[
+                      'services[$i].customCertificate.certificatePem'],
+                  child: ShadInput(
+                    controller: controllers.certificatePem,
+                    enabled: canEdit,
+                    autocorrect: false,
+                    minLines: 5,
+                    maxLines: 10,
+                    placeholder:
+                        const Text('-----BEGIN CERTIFICATE-----\n...'),
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12),
+                    onChanged: (v) => setState(() {
+                      svc.customCertificate ??= CustomCertificateConfig();
+                      svc.customCertificate!.certificatePem = v;
+                    }),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Field(
+                  label: 'Private key (PEM)',
+                  error: issueByPath[
+                      'services[$i].customCertificate.privateKeyPem'],
+                  child: ShadInput(
+                    controller: controllers.privateKeyPem,
+                    enabled: canEdit,
+                    autocorrect: false,
+                    minLines: 5,
+                    maxLines: 10,
+                    placeholder:
+                        const Text('-----BEGIN PRIVATE KEY-----\n...'),
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12),
+                    onChanged: (v) => setState(() {
+                      svc.customCertificate ??= CustomCertificateConfig();
+                      svc.customCertificate!.privateKeyPem = v;
+                    }),
+                  ),
+                ),
+              ],
             ] else ...[
               const SizedBox(height: 12),
               Field(
@@ -1121,19 +1118,27 @@ class _ServiceControllers {
   final TextEditingController httpHosts;
   final TextEditingController bindAddr;
   final TextEditingController token;
+  final TextEditingController certificatePem;
+  final TextEditingController privateKeyPem;
 
   _ServiceControllers.from(RatholeService svc)
       : name = TextEditingController(text: svc.name),
         httpHosts =
             TextEditingController(text: serviceHttpHosts(svc).join(', ')),
         bindAddr = TextEditingController(text: svc.bindAddr),
-        token = TextEditingController(text: svc.token ?? '');
+        token = TextEditingController(text: svc.token ?? ''),
+        certificatePem = TextEditingController(
+            text: svc.customCertificate?.certificatePem ?? ''),
+        privateKeyPem = TextEditingController(
+            text: svc.customCertificate?.privateKeyPem ?? '');
 
   void dispose() {
     name.dispose();
     httpHosts.dispose();
     bindAddr.dispose();
     token.dispose();
+    certificatePem.dispose();
+    privateKeyPem.dispose();
   }
 }
 

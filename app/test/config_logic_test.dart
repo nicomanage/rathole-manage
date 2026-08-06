@@ -97,36 +97,39 @@ void main() {
           enabled: true,
           bindAddr: httpProxyBindAddr,
           httpsBindAddr: httpsProxyBindAddr,
-          customCertificate: CustomCertificateConfig(
+        )
+        ..services[0].httpHosts = ['app.example.com']
+        ..services[0].customCertificate = CustomCertificateConfig(
             enabled: true,
             certificatePem:
                 '-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----',
             privateKeyPem:
                 '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----',
-          ),
-        )
-        ..services[0].httpHosts = ['app.example.com'];
+          );
       expect(validateConfig(config), isEmpty);
     });
 
-    test('rejects two HTTPS certificate sources', () {
+    test('allows ACME and per-backend certificates together', () {
       final config = baseConfig()
         ..http = HttpProxyConfig(
           enabled: true,
           bindAddr: httpProxyBindAddr,
           letsEncrypt: LetsEncryptConfig(enabled: true),
-          customCertificate: CustomCertificateConfig(
+        )
+        ..services[0].httpHosts = ['custom.example.com']
+        ..services[0].customCertificate = CustomCertificateConfig(
             enabled: true,
             certificatePem:
                 '-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----',
             privateKeyPem:
                 '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----',
-          ),
-        );
-      expect(
-          validateConfig(config)
-              .any((issue) => issue.path == 'http.customCertificate.enabled'),
-          isTrue);
+          )
+        ..services.add(RatholeService(
+            name: 'acme',
+            type: 'tcp',
+            bindAddr: '0.0.0.0:5001',
+            httpHosts: ['acme.example.com']));
+      expect(validateConfig(config), isEmpty);
     });
   });
 
@@ -159,6 +162,24 @@ void main() {
       expect(web.type, 'tcp');
       expect(web.httpHosts, ['app.example.com']);
       expect(web.bindAddr, '0.0.0.0:5001');
+    });
+
+    test('migrates a legacy global certificate to HTTP backends', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          customCertificate: CustomCertificateConfig(
+            enabled: true,
+            certificatePem: ' cert ',
+            privateKeyPem: ' key ',
+          ),
+        )
+        ..services[0].httpHosts = ['app.example.com'];
+      final normalized = normalizeConfig(config);
+      expect(normalized.http!.customCertificate, isNull);
+      expect(normalized.services[0].customCertificate!.certificatePem, 'cert');
+      expect(normalized.services[0].customCertificate!.privateKeyPem, 'key');
     });
 
     test('keeps routed services as TCP when proxy enabled', () {

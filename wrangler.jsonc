@@ -4,6 +4,12 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-13",
   "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    {
+      "pattern": "rathole.qwe7002.com",
+      "custom_domain": true
+    }
+  ],
   "secrets": {
     "required": ["SESSION_SECRET"]
   },
@@ -27,6 +33,7 @@
     {
       "binding": "STATUS_DB",
       "database_name": "rathole-manage-status",
+      "database_id": "75c19681-0af3-48f8-9558-b32c963d1454",
       "migrations_dir": "migrations"
     }
   ],

@@ -306,17 +306,67 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    // HTTPS is a property of the HTTP proxy, not a rathole service type. When
-    // Let's Encrypt is enabled, provision every configured TCP HTTP route.
-    let https_hosts = config
-        .services
-        .iter()
-        .flat_map(service_http_hosts)
-        .collect::<Vec<_>>();
-
     if routes.is_empty() {
         return Ok(None);
     }
+
+    let mut custom_certificates = config
+        .services
+        .iter()
+        .filter_map(|service| {
+            let certificate = service.custom_certificate.as_ref()?.clone();
+            if !certificate.enabled {
+                return None;
+            }
+            Some(AgentCustomCertificateConfig {
+                hosts: service_http_hosts(service),
+                certificate_pem: certificate.certificate_pem,
+                private_key_pem: certificate.private_key_pem,
+            })
+        })
+        .filter(|certificate| !certificate.hosts.is_empty())
+        .collect::<Vec<_>>();
+
+    // Accept the previous panel's global certificate and apply it only to
+    // backends that do not already have their own certificate.
+    let legacy_custom_certificate = http
+        .custom_certificate
+        .as_ref()
+        .filter(|certificate| certificate.enabled);
+    if let Some(legacy) = legacy_custom_certificate {
+        let hosts = config
+            .services
+            .iter()
+            .filter(|service| {
+                !service
+                    .custom_certificate
+                    .as_ref()
+                    .is_some_and(|c| c.enabled)
+            })
+            .flat_map(service_http_hosts)
+            .collect::<Vec<_>>();
+        if !hosts.is_empty() {
+            custom_certificates.push(AgentCustomCertificateConfig {
+                hosts,
+                certificate_pem: legacy.certificate_pem.clone(),
+                private_key_pem: legacy.private_key_pem.clone(),
+            });
+        }
+    }
+
+    // Let's Encrypt covers only backends without an operator-provided cert.
+    let https_hosts = config
+        .services
+        .iter()
+        .filter(|service| {
+            legacy_custom_certificate.is_none()
+                && !service
+                    .custom_certificate
+                    .as_ref()
+                    .is_some_and(|c| c.enabled)
+        })
+        .flat_map(service_http_hosts)
+        .collect::<Vec<_>>();
 
     let lets_encrypt = http
         .lets_encrypt
@@ -335,24 +385,13 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         })
         .transpose()?;
 
-    let custom_certificate = http
-        .custom_certificate
-        .as_ref()
-        .filter(|config| config.enabled)
-        .map(|config| AgentCustomCertificateConfig {
-            certificate_pem: config.certificate_pem.clone(),
-            private_key_pem: config.private_key_pem.clone(),
-        });
-    if lets_encrypt.is_some() && custom_certificate.is_some() {
-        anyhow::bail!("choose either Let's Encrypt or a custom certificate, not both");
-    }
-    let https_enabled = lets_encrypt.is_some() || custom_certificate.is_some();
+    let https_enabled = lets_encrypt.is_some() || !custom_certificates.is_empty();
 
     Ok(Some(AgentHttpProxyConfig {
         bind_addr: HTTP_PROXY_BIND_ADDR.into(),
         https_bind_addr: https_enabled.then(|| HTTPS_PROXY_BIND_ADDR.into()),
         lets_encrypt,
-        custom_certificate,
+        custom_certificates,
         https_hosts,
         routes,
     }))
@@ -439,6 +478,7 @@ mod tests {
             bind_addr: "0.0.0.0:8080".into(),
             http_host: Some(host.into()),
             http_hosts: None,
+            custom_certificate: None,
             token: None,
             nodelay: None,
         }
@@ -455,6 +495,7 @@ mod tests {
             bind_addr: "0.0.0.0:8080".into(),
             http_host: None,
             http_hosts: Some(hosts.iter().map(|host| host.to_string()).collect()),
+            custom_certificate: None,
             token: None,
             nodelay: None,
         }
@@ -481,9 +522,7 @@ mod tests {
             vec![service("web", WireServiceType::Tcp, "app.example.com")],
             "admin@example.com",
         );
-        let http = config.http.as_mut().unwrap();
-        http.lets_encrypt.as_mut().unwrap().enabled = false;
-        http.custom_certificate = Some(WireCustomCertificateConfig {
+        config.services[0].custom_certificate = Some(WireCustomCertificateConfig {
             enabled: true,
             certificate_pem: "certificate pem".into(),
             private_key_pem: "private key pem".into(),
@@ -495,9 +534,53 @@ mod tests {
             proxy.https_bind_addr.as_deref(),
             Some(HTTPS_PROXY_BIND_ADDR)
         );
-        let custom = proxy.custom_certificate.unwrap();
+        let custom = &proxy.custom_certificates[0];
+        assert_eq!(custom.hosts, vec!["app.example.com"]);
         assert_eq!(custom.certificate_pem, "certificate pem");
         assert_eq!(custom.private_key_pem, "private key pem");
+    }
+
+    #[test]
+    fn custom_certificate_only_replaces_acme_for_its_backend() {
+        let mut config = config(
+            vec![
+                service("custom", WireServiceType::Tcp, "custom.example.com"),
+                service("acme", WireServiceType::Tcp, "acme.example.com"),
+            ],
+            "admin@example.com",
+        );
+        config.services[0].custom_certificate = Some(WireCustomCertificateConfig {
+            enabled: true,
+            certificate_pem: "certificate pem".into(),
+            private_key_pem: "private key pem".into(),
+        });
+
+        let proxy = http_proxy_config(&config).unwrap().unwrap();
+        assert!(proxy.lets_encrypt.is_some());
+        assert_eq!(proxy.https_hosts, vec!["acme.example.com"]);
+        assert_eq!(proxy.custom_certificates.len(), 1);
+        assert_eq!(
+            proxy.custom_certificates[0].hosts,
+            vec!["custom.example.com"]
+        );
+    }
+
+    #[test]
+    fn legacy_global_certificate_covers_backends_without_acme() {
+        let mut config = config(
+            vec![service("web", WireServiceType::Tcp, "app.example.com")],
+            "admin@example.com",
+        );
+        config.http.as_mut().unwrap().custom_certificate = Some(WireCustomCertificateConfig {
+            enabled: true,
+            certificate_pem: "legacy certificate".into(),
+            private_key_pem: "legacy key".into(),
+        });
+
+        let proxy = http_proxy_config(&config).unwrap().unwrap();
+        assert!(proxy.lets_encrypt.is_none());
+        assert!(proxy.https_hosts.is_empty());
+        assert_eq!(proxy.custom_certificates[0].hosts, vec!["app.example.com"]);
     }
 
     #[test]

@@ -60,25 +60,34 @@ List<String> serviceHttpHosts(RatholeService service) {
 /// addresses).
 RatholeConfig normalizeConfig(RatholeConfig input) {
   final config = input.clone();
+  final legacyCustomCertificate = config.http?.customCertificate;
 
   final services = <RatholeService>[];
   for (var i = 0; i < config.services.length; i++) {
     final service = config.services[i].clone();
     final httpHosts = serviceHttpHosts(service);
     final legacyHttpService = isHttpService(service);
+    final customCertificate = service.customCertificate ??
+        (httpHosts.isNotEmpty ? legacyCustomCertificate : null);
     service
       ..type = legacyHttpService ? 'tcp' : service.type
       ..bindAddr = legacyHttpService
           ? restorePublicBindAddr(service, i)
           : service.bindAddr
       ..httpHost = null
-      ..httpHosts = httpHosts.isNotEmpty ? httpHosts : null;
+      ..httpHosts = httpHosts.isNotEmpty ? httpHosts : null
+      ..customCertificate = customCertificate == null
+          ? null
+          : CustomCertificateConfig(
+              enabled: customCertificate.enabled,
+              certificatePem: customCertificate.certificatePem.trim(),
+              privateKeyPem: customCertificate.privateKeyPem.trim(),
+            );
     services.add(service);
   }
 
   if (config.http != null) {
     final le = config.http!.letsEncrypt;
-    final custom = config.http!.customCertificate;
     config.http = HttpProxyConfig(
       enabled: config.http!.enabled,
       bindAddr: httpProxyBindAddr,
@@ -89,13 +98,6 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
               enabled: le.enabled,
               email: le.email.trim(),
               staging: le.staging,
-            ),
-      customCertificate: custom == null
-          ? null
-          : CustomCertificateConfig(
-              enabled: custom.enabled,
-              certificatePem: custom.certificatePem.trim(),
-              privateKeyPem: custom.privateKeyPem.trim(),
             ),
     );
   }
@@ -217,12 +219,11 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
 
   final httpEnabled = config.http?.enabled ?? false;
   final letsEncryptEnabled = config.http?.letsEncrypt?.enabled ?? false;
-  final customCertificateEnabled =
-      config.http?.customCertificate?.enabled ?? false;
   final httpRoutes = config.services.where(hasHttpRoute).toList();
-  final letsEncryptActive = letsEncryptEnabled && httpRoutes.isNotEmpty;
+  final letsEncryptActive = letsEncryptEnabled &&
+      httpRoutes.any((service) => service.customCertificate?.enabled != true);
   final customCertificateActive =
-      customCertificateEnabled && httpRoutes.isNotEmpty;
+      httpRoutes.any((service) => service.customCertificate?.enabled == true);
   if (httpEnabled || httpRoutes.isNotEmpty) {
     final httpBindAddr = config.http?.bindAddr.trim().isNotEmpty == true
         ? config.http!.bindAddr.trim()
@@ -230,25 +231,6 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
     if (httpBindAddr != httpProxyBindAddr) {
       issues.add(ValidationIssue(
           'http.bindAddr', 'HTTP proxy always listens on $httpProxyBindAddr.'));
-    }
-  }
-  if (letsEncryptEnabled && customCertificateEnabled) {
-    issues.add(const ValidationIssue('http.customCertificate.enabled',
-        "Choose either Let's Encrypt or a custom certificate, not both."));
-  }
-  if (customCertificateEnabled) {
-    final certificatePem =
-        config.http?.customCertificate?.certificatePem.trim() ?? '';
-    final privateKeyPem =
-        config.http?.customCertificate?.privateKeyPem.trim() ?? '';
-    if (!certificatePem.contains('-----BEGIN CERTIFICATE-----')) {
-      issues.add(const ValidationIssue('http.customCertificate.certificatePem',
-          'Custom certificate must contain a PEM certificate chain.'));
-    }
-    if (!RegExp(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----')
-        .hasMatch(privateKeyPem)) {
-      issues.add(const ValidationIssue('http.customCertificate.privateKeyPem',
-          'Custom certificate must contain a PEM private key.'));
     }
   }
   if (letsEncryptActive || customCertificateActive) {
@@ -282,6 +264,24 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
     }
 
     final httpHosts = serviceHttpHosts(svc);
+    final customCertificate = svc.customCertificate;
+    if (customCertificate != null && customCertificate.enabled) {
+      if (httpHosts.isEmpty) {
+        issues.add(ValidationIssue('$base.customCertificate.enabled',
+            'Service "$label" needs at least one HTTP host before enabling a custom certificate.'));
+      }
+      if (!customCertificate.certificatePem
+          .trim()
+          .contains('-----BEGIN CERTIFICATE-----')) {
+        issues.add(ValidationIssue('$base.customCertificate.certificatePem',
+            'Service "$label" custom certificate must contain a PEM certificate chain.'));
+      }
+      if (!RegExp(r'-----BEGIN (?:RSA |EC )?PRIVATE KEY-----')
+          .hasMatch(customCertificate.privateKeyPem.trim())) {
+        issues.add(ValidationIssue('$base.customCertificate.privateKeyPem',
+            'Service "$label" custom certificate must contain a PEM private key.'));
+      }
+    }
     if (httpHosts.isNotEmpty) {
       if (svc.type == 'udp') {
         issues.add(ValidationIssue('$base.httpHosts',
