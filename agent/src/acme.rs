@@ -770,9 +770,12 @@ mod imp {
 
         #[test]
         fn domains_are_lowercased_sorted_and_deduped() {
-            let normalized =
-                normalize_domains(&owned(&["B.example.com.", "a.example.com", "A.example.com"]))
-                    .expect("normalize");
+            let normalized = normalize_domains(&owned(&[
+                "B.example.com.",
+                "a.example.com",
+                "A.example.com",
+            ]))
+            .expect("normalize");
             assert_eq!(normalized, vec!["a.example.com", "b.example.com"]);
         }
 

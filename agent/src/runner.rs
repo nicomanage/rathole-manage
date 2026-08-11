@@ -16,8 +16,8 @@ use tokio::task::JoinHandle;
 
 use crate::http_proxy::{HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute};
 use crate::protocol::{
-    CertificateStatus, DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
-    ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
+    CertificateStatus, DesiredProcessState, ProcessState, RatholeConfig, RatholeService,
+    ServiceRef, ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
 };
 
 const HTTP_PROXY_BIND_ADDR: &str = "[::]:80";

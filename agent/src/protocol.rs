@@ -295,8 +295,7 @@ mod tests {
             traffic: None,
             certificate,
         };
-        serde_json::from_str(&serde_json::to_string(&msg).expect("serialize"))
-            .expect("valid JSON")
+        serde_json::from_str(&serde_json::to_string(&msg).expect("serialize")).expect("valid JSON")
     }
 
     /// `rename_all_fields` on the enum does not reach nested structs, so this
