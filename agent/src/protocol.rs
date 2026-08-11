@@ -231,8 +231,11 @@ pub enum AgentToHub {
         #[serde(skip_serializing_if = "Option::is_none")]
         traffic: Option<HashMap<String, TrafficStat>>,
         /// Omitted when Let's Encrypt is off; the hub reads that as "clear it".
+        ///
+        /// Boxed to keep this variant from dwarfing the rest of the enum, the
+        /// same reason `HubToAgent::ApplyConfig` boxes its config.
         #[serde(skip_serializing_if = "Option::is_none")]
-        certificate: Option<CertificateStatus>,
+        certificate: Option<Box<CertificateStatus>>,
     },
     Log {
         line: String,
@@ -293,7 +296,7 @@ mod tests {
             metrics: None,
             service_status: None,
             traffic: None,
-            certificate,
+            certificate: certificate.map(Box::new),
         };
         serde_json::from_str(&serde_json::to_string(&msg).expect("serialize")).expect("valid JSON")
     }

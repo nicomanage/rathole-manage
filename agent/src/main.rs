@@ -266,7 +266,7 @@ async fn run_daemon() -> Result<()> {
                     metrics: Some(metrics),
                     service_status: statuses,
                     traffic,
-                    certificate,
+                    certificate: certificate.map(Box::new),
                 };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
@@ -426,7 +426,7 @@ async fn handle_hub_message(
                 metrics: None,
                 service_status: statuses,
                 traffic,
-                certificate,
+                certificate: certificate.map(Box::new),
             });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),
