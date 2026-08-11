@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::http_proxy::{HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute};
 use crate::protocol::{
-    DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
+    CertificateStatus, DesiredProcessState, ProcessState, RatholeConfig, RatholeService, ServiceRef,
     ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
 };
 
@@ -156,13 +156,43 @@ impl Runner {
             return Ok(());
         }
 
-        self.restart().await;
-        Ok(())
+        self.restart().await
     }
 
     /// Start the embedded rathole server if it isn't already running.
+    ///
+    /// The HTTP proxy is brought up on a best-effort basis: a proxy failure (a
+    /// bad DNS record breaking ACME, say) used to abort this whole function, so
+    /// rathole never started and *every* TCP/UDP tunnel on the node went down
+    /// with HTTPS. Now rathole starts regardless and the proxy error is folded
+    /// into the return value at the end, so an explicit Start command still
+    /// reports it.
     pub async fn start(&mut self) -> Result<()> {
-        self.http_proxy.apply(self.http_config.clone()).await?;
+        let proxy_error = match self.http_proxy.apply(self.http_config.clone()).await {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::error!("HTTP proxy failed to start, continuing without it: {e:#}");
+                Some(e)
+            }
+        };
+        let started = self.start_rathole().await;
+        match (started, proxy_error) {
+            (Err(e), _) => Err(e),
+            (Ok(()), Some(e)) => {
+                self.last_error = Some(format!("{e:#}"));
+                Err(e)
+            }
+            (Ok(()), None) => {
+                // Everything came up: retire any error left over from a previous
+                // attempt, including one start_rathole skipped clearing because
+                // rathole was already running.
+                self.last_error = None;
+                Ok(())
+            }
+        }
+    }
+
+    async fn start_rathole(&mut self) -> Result<()> {
         if self.is_running() {
             return Ok(());
         }
@@ -218,11 +248,22 @@ impl Runner {
         }
     }
 
-    pub async fn restart(&mut self) {
+    pub async fn restart(&mut self) -> Result<()> {
         self.stop().await;
         if let Err(e) = self.start().await {
+            // Previously swallowed into last_error, where nothing ever read the
+            // message. Log it so it reaches the panel's live log stream, and
+            // return it so config acks and command results stop claiming success.
+            tracing::error!("restart failed: {e:#}");
             self.last_error = Some(format!("{e:#}"));
+            return Err(e);
         }
+        Ok(())
+    }
+
+    /// Certificate state to report to the hub, if the proxy has any.
+    pub fn certificate_status(&self) -> Option<CertificateStatus> {
+        self.http_proxy.certificate_status()
     }
 }
 

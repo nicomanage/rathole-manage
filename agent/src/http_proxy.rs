@@ -19,7 +19,10 @@ pub struct HttpProxyConfig {
 #[cfg(unix)]
 mod imp {
     use super::{HttpProxyConfig, HttpRoute};
-    use crate::acme::{AcmeIssuer, CertificatePaths, ChallengeStore};
+    use crate::acme::{
+        AcmeIssuer, CertificateOutcome, CertificatePaths, ChallengeStore, LetsEncryptConfig,
+    };
+    use crate::protocol::{truncate_cert_error, CertificateState, CertificateStatus};
     use anyhow::{bail, Context, Result as AnyResult};
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -305,6 +308,7 @@ mod imp {
     pub struct HttpProxyRunner {
         shared: Arc<SharedState>,
         running: Option<Running>,
+        cert_status: Option<CertificateStatus>,
     }
 
     impl Default for HttpProxyRunner {
@@ -318,35 +322,69 @@ mod imp {
             Self {
                 shared: Arc::new(SharedState::default()),
                 running: None,
+                cert_status: None,
             }
+        }
+
+        /// Last known certificate state, for the status report to the hub.
+        pub fn certificate_status(&self) -> Option<CertificateStatus> {
+            self.cert_status.clone()
         }
 
         pub async fn apply(&mut self, config: Option<HttpProxyConfig>) -> AnyResult<()> {
             let Some(config) = config.filter(|c| !c.routes.is_empty()) else {
                 self.set_routes(&[]);
+                self.cert_status = None;
                 self.stop().await?;
                 return Ok(());
             };
 
             self.set_routes(&config.routes);
             let mut runtime = RuntimeConfig::http_only(config.bind_addr.clone());
+            // No Let's Encrypt this time round: drop any state from a previous config.
+            let mut renewed = false;
+            if config.lets_encrypt.is_none() {
+                self.cert_status = None;
+            }
 
             if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
                 self.ensure_http_listener(&config.bind_addr).await?;
                 let domains = route_domains(&config.https_hosts);
                 if domains.is_empty() {
+                    self.cert_status = None;
                     self.ensure_running(runtime).await?;
                     return Ok(());
                 }
-                let issuer = AcmeIssuer::new(self.shared.challenges.clone());
-                let certificate = issuer
-                    .ensure_certificate(lets_encrypt, &domains)
-                    .await
-                    .context("ensuring Let's Encrypt certificate")?;
-                runtime.https_bind_addr = config.https_bind_addr.clone();
-                runtime.certificate = Some(certificate);
+                // Scoped so the immutable borrow of `self` ends before the
+                // `&mut self` write below.
+                let outcome = {
+                    let issuer = AcmeIssuer::new(self.shared.challenges.clone());
+                    issuer.ensure_certificate(lets_encrypt, &domains).await
+                };
+                let outcome = outcome.context("ensuring Let's Encrypt certificate")?;
+                self.cert_status = Some(certificate_status(&outcome, lets_encrypt, &domains));
+                renewed = outcome.renewed;
+
+                if let Some(error) = outcome.error.as_deref() {
+                    tracing::error!(domains = ?domains, "Let's Encrypt issuance failed: {error}");
+                }
+                if let Some(paths) = outcome.paths {
+                    runtime.https_bind_addr = config.https_bind_addr.clone();
+                    runtime.certificate = Some(paths);
+                } else {
+                    // Nothing servable: stay on plain HTTP so the challenge
+                    // endpoint keeps working for the next attempt.
+                    tracing::warn!("serving HTTP only until a certificate is available");
+                }
             }
 
+            if renewed && self.running.is_some() {
+                // RuntimeConfig compares certificate *paths*, and a renewal rewrites
+                // the same files, so ensure_running would see no change and leave
+                // Pingora holding the old certificate it read at startup.
+                tracing::info!("restarting the HTTP proxy to load the renewed certificate");
+                self.stop().await?;
+            }
             self.ensure_running(runtime).await?;
             Ok(())
         }
@@ -555,6 +593,44 @@ mod imp {
         (!normalized.is_empty()).then_some(normalized)
     }
 
+    /// Fold an issuance result into the shape the hub and panel consume.
+    fn certificate_status(
+        outcome: &CertificateOutcome,
+        lets_encrypt: &LetsEncryptConfig,
+        domains: &[String],
+    ) -> CertificateStatus {
+        let state = if outcome.error.is_some() {
+            CertificateState::Failed
+        } else if outcome.facts.not_after_ms.is_none() {
+            CertificateState::Pending
+        } else if outcome.facts.fresh {
+            CertificateState::Valid
+        } else {
+            // Parsed, not fresh, and we did not just replace it.
+            CertificateState::Expiring
+        };
+        // Describe the certificate we are actually serving, not the set that was
+        // requested: a failed re-issue falls back to the previous certificate,
+        // whose SAN set may not include a newly added host.
+        let domains = match outcome.paths {
+            Some(_) => outcome
+                .facts
+                .covered_domains
+                .clone()
+                .unwrap_or_else(|| domains.to_vec()),
+            // Nothing servable, so nothing is covered.
+            None => Vec::new(),
+        };
+        CertificateStatus {
+            domains,
+            staging: lets_encrypt.staging,
+            state,
+            not_after: outcome.facts.not_after_ms,
+            error: outcome.error.as_deref().map(truncate_cert_error),
+            checked_at: crate::now_ms(),
+        }
+    }
+
     fn route_domains(hosts: &[String]) -> Vec<String> {
         let mut domains = hosts
             .iter()
@@ -584,6 +660,7 @@ mod imp {
 #[cfg(not(unix))]
 mod imp {
     use super::HttpProxyConfig;
+    use crate::protocol::CertificateStatus;
     use anyhow::{bail, Result};
 
     #[derive(Default)]
@@ -592,6 +669,11 @@ mod imp {
     impl HttpProxyRunner {
         pub fn new() -> Self {
             Self
+        }
+
+        /// No proxy on this platform, so never a certificate.
+        pub fn certificate_status(&self) -> Option<CertificateStatus> {
+            None
         }
 
         pub async fn apply(&mut self, config: Option<HttpProxyConfig>) -> Result<()> {

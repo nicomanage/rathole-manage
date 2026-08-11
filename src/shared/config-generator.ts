@@ -212,6 +212,30 @@ function validateHttpHost(value: string): string | null {
   return null;
 }
 
+/**
+ * Check an ACME account contact address.
+ *
+ * Deliberately loose: the agent only wraps this in `mailto:` for the Let's
+ * Encrypt account, and Let's Encrypt is the real authority on what it accepts.
+ * This exists to catch the mistakes that would otherwise fail on the node with
+ * no way back to the panel.
+ */
+function validateAcmeEmail(value: string): string | null {
+  const input = value.trim();
+  if (input !== value || /\s/.test(input)) return "must not contain whitespace.";
+  const at = input.indexOf("@");
+  if (at < 0 || at !== input.lastIndexOf("@")) {
+    return "must be an email address such as admin@example.com.";
+  }
+  const local = input.slice(0, at);
+  const domain = input.slice(at + 1);
+  if (!local) return "is missing the part before the @.";
+  if (!domain.includes(".") || !isValidHostname(domain)) {
+    return "must end in a valid domain such as example.com.";
+  }
+  return null;
+}
+
 /** Validate a config, returning a list of human-readable problems (empty = ok). */
 export function validateConfig(config: RatholeConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -250,6 +274,23 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
         path: "http.httpsBindAddr",
         message: `HTTPS proxy always listens on ${HTTPS_PROXY_BIND_ADDR}.`,
       });
+    }
+    // The agent refuses to build an ACME account without a contact address, and
+    // that refusal never makes it back to the panel — so catch it here.
+    const email = config.http?.letsEncrypt?.email ?? "";
+    if (!email.trim()) {
+      issues.push({
+        path: "http.letsEncrypt.email",
+        message: "Let's Encrypt needs an ACME account email.",
+      });
+    } else {
+      const emailError = validateAcmeEmail(email);
+      if (emailError) {
+        issues.push({
+          path: "http.letsEncrypt.email",
+          message: `ACME account email ${emailError}`,
+        });
+      }
     }
   }
 

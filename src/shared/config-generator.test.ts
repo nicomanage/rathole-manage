@@ -214,7 +214,26 @@ describe("validateConfig", () => {
     expect(issues.some((i) => i.path === "http.httpsBindAddr" && /always listens/.test(i.message))).toBe(true);
   });
 
-  it("does not validate Let's Encrypt account email in the form", () => {
+  it("requires an ACME account email once Let's Encrypt can issue", () => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email: "" },
+        },
+        services: [
+          { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+  });
+
+  it("ignores a blank ACME email while nothing can be issued yet", () => {
+    // Let's Encrypt on but no HTTPS service: the agent provisions nothing, so an
+    // empty email must not block saving a half-built config.
     expect(
       validateConfig(
         config({
@@ -225,11 +244,34 @@ describe("validateConfig", () => {
             letsEncrypt: { enabled: true, email: "" },
           },
           services: [
-            { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+            { name: "web", type: "http", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
           ],
         }),
       ),
     ).toEqual([]);
+  });
+
+  it.each([
+    ["no at sign", "adminexample.com"],
+    ["two at signs", "admin@@example.com"],
+    ["missing local part", "@example.com"],
+    ["bare domain label", "admin@example"],
+    ["embedded whitespace", "admin @example.com"],
+  ])("rejects a malformed ACME account email (%s)", (_label, email) => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email },
+        },
+        services: [
+          { name: "web", type: "https", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
   });
 
   it("normalizes proxy binds to fixed IPv6 wildcard ports", () => {

@@ -15,6 +15,7 @@ import {
 } from "@shared/config-generator";
 import type {
   AgentCommand,
+  CertificateStatus,
   HttpProxyConfig,
   InstanceView,
   RatholeConfig,
@@ -28,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -218,6 +219,7 @@ export function InstanceDetail() {
           initial={instance.config}
           serviceStatus={instance.serviceStatus}
           traffic={instance.traffic}
+          certificate={instance.certificate}
           online={instance.status === "online"}
           canEdit={isAdmin}
         />
@@ -360,11 +362,140 @@ function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }
   );
 }
 
+/** Per-host view of the single multi-SAN certificate the agent provisions. */
+type HostCertState = "covered" | "expiring" | "failed" | "pending" | "unknown";
+
+function CertStatusDot({ state }: { state: HostCertState }) {
+  const map = {
+    covered: { cls: "bg-success", title: "Covered by the current certificate" },
+    expiring: { cls: "bg-yellow-500", title: "Covered, but the certificate is near expiry" },
+    failed: { cls: "bg-destructive", title: "The last issuance attempt failed" },
+    pending: {
+      cls: "bg-muted-foreground/50",
+      title: "Not in the current certificate — save to have it provisioned",
+    },
+    unknown: {
+      cls: "bg-muted-foreground/25",
+      title: "Unknown (node offline, or nothing issued yet)",
+    },
+  } as const;
+  const { cls, title } = map[state];
+  return (
+    <span className="inline-flex items-center" title={title}>
+      <span className={cn("h-2.5 w-2.5 rounded-full", cls)} />
+    </span>
+  );
+}
+
+function daysUntil(epochMs: number): number {
+  return Math.ceil((epochMs - Date.now()) / 86_400_000);
+}
+
+/**
+ * Live certificate state for the https hosts on this node.
+ *
+ * The agent issues one certificate covering every https host, so a host's state
+ * is "is it in that certificate's SAN set, and how is that certificate doing".
+ */
+function CertificatePanel({
+  hosts,
+  certificate,
+  online,
+  staging,
+}: {
+  hosts: string[];
+  certificate?: CertificateStatus;
+  online: boolean;
+  staging: boolean;
+}) {
+  if (hosts.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        No https services yet, so nothing is provisioned. Set a service's type to https on
+        the Services tab to have its hosts covered.
+      </p>
+    );
+  }
+
+  const covered = new Set((certificate?.domains ?? []).map((d) => d.toLowerCase()));
+  const known = online && certificate;
+
+  function hostState(host: string): HostCertState {
+    if (!known) return "unknown";
+    if (certificate.state === "failed") return "failed";
+    if (!covered.has(host.toLowerCase())) return "pending";
+    if (certificate.state === "expiring") return "expiring";
+    if (certificate.state === "pending") return "pending";
+    return "covered";
+  }
+
+  const badge: { label: string; variant: "success" | "secondary" | "destructive" | "muted" } =
+    !known
+      ? { label: "unknown", variant: "muted" }
+      : certificate.state === "valid"
+        ? { label: "valid", variant: "success" }
+        : certificate.state === "expiring"
+          ? { label: "expiring", variant: "secondary" }
+          : certificate.state === "failed"
+            ? { label: "failed", variant: "destructive" }
+            : { label: "pending", variant: "muted" };
+
+  let summary: string;
+  if (!online) {
+    summary = "Node is offline, so its certificate state is unknown.";
+  } else if (!certificate) {
+    summary = "The agent has not reported a certificate yet. Save to push this config to it.";
+  } else if (certificate.notAfter) {
+    const left = daysUntil(certificate.notAfter);
+    const expiry = new Date(certificate.notAfter).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    summary =
+      `${certificate.staging ? "Staging" : "Production"} · expires ${expiry} ` +
+      `(${left > 0 ? `in ${left} ${left === 1 ? "day" : "days"}` : "expired"})`;
+  } else {
+    summary = `${certificate.staging ? "Staging" : "Production"} · nothing issued yet`;
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-medium">Certificate</span>
+        <Badge variant={badge.variant}>{badge.label}</Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {summary}
+        {known && ` · checked ${relativeTime(certificate.checkedAt)}`}
+      </p>
+      {known && certificate.error && (
+        <p className="text-xs break-words text-destructive">{certificate.error}</p>
+      )}
+      {known && certificate.staging !== staging && (
+        <p className="text-xs text-muted-foreground">
+          The certificate above came from the {certificate.staging ? "staging" : "production"}{" "}
+          directory. Save to re-issue from {staging ? "staging" : "production"}.
+        </p>
+      )}
+      <div className="space-y-1 pt-1">
+        {hosts.map((host) => (
+          <div key={host} className="flex items-center gap-2 text-xs">
+            <CertStatusDot state={hostState(host)} />
+            <span className="font-mono">{host}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ConfigEditor({
   id,
   initial,
   serviceStatus,
   traffic,
+  certificate,
   online,
   canEdit,
 }: {
@@ -372,6 +503,7 @@ function ConfigEditor({
   initial: RatholeConfig;
   serviceStatus?: Record<string, boolean>;
   traffic?: Record<string, TrafficStat>;
+  certificate?: CertificateStatus;
   online: boolean;
   canEdit: boolean;
 }) {
@@ -516,6 +648,18 @@ function ConfigEditor({
 
   const serviceTypes = config.http?.enabled ? HTTP_SERVICE_TYPES : BASIC_SERVICE_TYPES;
   const showPublicBindColumn = config.services.some((svc) => !isHttpServiceType(svc.type));
+  const httpEnabled = !!config.http?.enabled;
+  const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
+  const httpServiceCount = config.services.filter((svc) => isHttpServiceType(svc.type)).length;
+  // The agent provisions one certificate for exactly this set: the hosts of
+  // every https service (see http_proxy_config in agent/src/runner.rs).
+  const httpsHosts = useMemo(
+    () =>
+      config.services
+        .filter((svc) => svc.type === "https")
+        .flatMap((svc) => serviceHttpHosts(svc)),
+    [config.services],
+  );
 
   const validationPanel =
     issues.length > 0 ? (
@@ -619,48 +763,125 @@ function ConfigEditor({
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <div className="flex items-center gap-2">
             <Globe className="h-4 w-4 text-muted-foreground" />
-            HTTP service
-          </CardTitle>
+            <CardTitle className="text-base">HTTP reverse proxy</CardTitle>
+          </div>
+          <CardDescription>
+            Runs the agent's embedded Pingora proxy on{" "}
+            <code className="font-mono">{HTTP_PROXY_BIND_ADDR}</code>, routing by Host header
+            into your services. Required before a service can be typed http or https.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
+        <CardContent>
           <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
             <div>
-              <Label>Pingora</Label>
+              <Label>Enable the proxy</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {httpEnabled && httpServiceCount > 0
+                  ? `Turning this off reverts ${httpServiceCount} http/https ${
+                      httpServiceCount === 1 ? "service" : "services"
+                    } to plain tcp.`
+                  : "Turning this off reverts any http/https service to plain tcp."}
+              </p>
               {issueByPath.has("http.enabled") && (
                 <p className="mt-1 text-xs text-destructive">{issueByPath.get("http.enabled")}</p>
               )}
             </div>
             <Switch
-              checked={!!config.http?.enabled}
+              checked={httpEnabled}
               disabled={!canEdit}
               onCheckedChange={(enabled) => updateHttp({ enabled })}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <LockKeyhole className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-base">TLS certificate</CardTitle>
+          </div>
+          <CardDescription>
+            Provisions one Let's Encrypt certificate covering every https host on this node
+            and serves it on <code className="font-mono">{HTTPS_PROXY_BIND_ADDR}</code>.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
           <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
             <div>
-              <Label className="flex items-center gap-2">
-                <LockKeyhole className="h-4 w-4 text-muted-foreground" />
-                Let's Encrypt
-              </Label>
+              <Label>Automatic certificates</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Turning this on also enables the HTTP reverse proxy, which answers the
+                HTTP-01 challenge.
+              </p>
             </div>
             <Switch
-              checked={!!config.http?.letsEncrypt?.enabled}
+              checked={letsEncryptEnabled}
               disabled={!canEdit}
               onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
             />
           </div>
-          <div className="space-y-2">
-            <Label>ACME email</Label>
-            <Input
-              className="font-mono"
-              placeholder="admin@example.com"
-              value={config.http?.letsEncrypt?.email ?? ""}
-              disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
-              onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
-            />
-          </div>
+
+          {letsEncryptEnabled && (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>
+                    ACME account email <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    aria-invalid={issueByPath.has("http.letsEncrypt.email")}
+                    className={cn(
+                      "font-mono",
+                      issueByPath.has("http.letsEncrypt.email") && "border-destructive",
+                    )}
+                    placeholder="admin@example.com"
+                    value={config.http?.letsEncrypt?.email ?? ""}
+                    disabled={!canEdit}
+                    onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
+                  />
+                  {issueByPath.has("http.letsEncrypt.email") ? (
+                    <p className="text-xs text-destructive">
+                      {issueByPath.get("http.letsEncrypt.email")}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Let's Encrypt sends expiry warnings here.
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-start justify-between gap-4 rounded-md border px-3 py-2">
+                  <div>
+                    <Label>Use the staging directory</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Issues untrusted test certificates that browsers reject, but does not
+                      consume production rate limits. Switching environments uses a separate
+                      ACME account and certificate store.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={!!config.http?.letsEncrypt?.staging}
+                    disabled={!canEdit}
+                    onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                HTTP-01 validation requires every https host below to resolve to this node
+                and port 80 to be reachable from the internet.
+              </p>
+
+              <CertificatePanel
+                hosts={httpsHosts}
+                certificate={certificate}
+                online={online}
+                staging={!!config.http?.letsEncrypt?.staging}
+              />
+            </>
+          )}
         </CardContent>
       </Card>
 

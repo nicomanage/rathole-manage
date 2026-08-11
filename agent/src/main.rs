@@ -241,6 +241,8 @@ async fn run_daemon() -> Result<()> {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
             let mut ticker = tokio::time::interval(status_interval());
+            // Skip missed ticks rather than firing a catch-up burst of reports.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
                 let mut guard = runner.lock().await;
@@ -248,6 +250,7 @@ async fn run_daemon() -> Result<()> {
                 let state = guard.state();
                 let statuses = guard.service_status();
                 let traffic = guard.traffic();
+                let certificate = guard.certificate_status();
                 drop(guard);
                 let metrics = Metrics {
                     cpu_percent: collector.cpu_percent(),
@@ -263,6 +266,7 @@ async fn run_daemon() -> Result<()> {
                     metrics: Some(metrics),
                     service_status: statuses,
                     traffic,
+                    certificate,
                 };
                 if let Ok(text) = serde_json::to_string(&msg) {
                     let _ = to_hub_tx.send(text);
@@ -404,15 +408,13 @@ async fn handle_hub_message(
                     guard.stop().await;
                     Ok(())
                 }
-                AgentCommand::Restart | AgentCommand::Reload => {
-                    guard.restart().await;
-                    Ok(())
-                }
+                AgentCommand::Restart | AgentCommand::Reload => guard.restart().await,
                 AgentCommand::Status => Ok(()),
             };
             let state = guard.state();
             let statuses = guard.service_status();
             let traffic = guard.traffic();
+            let certificate = guard.certificate_status();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
@@ -424,6 +426,7 @@ async fn handle_hub_message(
                 metrics: None,
                 service_status: statuses,
                 traffic,
+                certificate,
             });
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),

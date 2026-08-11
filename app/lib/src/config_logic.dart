@@ -217,6 +217,25 @@ String? _validateHttpHost(String value) {
   return null;
 }
 
+/// Mirror of `validateAcmeEmail` in src/shared/config-generator.ts.
+String? _validateAcmeEmail(String value) {
+  final input = value.trim();
+  if (input != value || RegExp(r'\s').hasMatch(input)) {
+    return 'must not contain whitespace.';
+  }
+  final at = input.indexOf('@');
+  if (at < 0 || at != input.lastIndexOf('@')) {
+    return 'must be an email address such as admin@example.com.';
+  }
+  final local = input.substring(0, at);
+  final domain = input.substring(at + 1);
+  if (local.isEmpty) return 'is missing the part before the @.';
+  if (!domain.contains('.') || !_isValidHostname(domain)) {
+    return 'must end in a valid domain such as example.com.';
+  }
+  return null;
+}
+
 /// Validate a config, returning human-readable problems (empty = ok).
 List<ValidationIssue> validateConfig(RatholeConfig config) {
   final issues = <ValidationIssue>[];
@@ -252,6 +271,19 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
     if (httpsBindAddr != httpsProxyBindAddr) {
       issues.add(ValidationIssue('http.httpsBindAddr',
           'HTTPS proxy always listens on $httpsProxyBindAddr.'));
+    }
+    // The agent refuses to build an ACME account without a contact address, and
+    // that refusal never makes it back to the panel.
+    final email = config.http?.letsEncrypt?.email ?? '';
+    if (email.trim().isEmpty) {
+      issues.add(const ValidationIssue(
+          'http.letsEncrypt.email', "Let's Encrypt needs an ACME account email."));
+    } else {
+      final emailError = _validateAcmeEmail(email);
+      if (emailError != null) {
+        issues.add(ValidationIssue(
+            'http.letsEncrypt.email', 'ACME account email $emailError'));
+      }
     }
   }
 
