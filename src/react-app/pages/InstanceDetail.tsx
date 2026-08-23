@@ -69,6 +69,10 @@ import {
   Pencil,
   Globe,
   LockKeyhole,
+  Shield,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldX,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -365,27 +369,68 @@ function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }
 /** Per-host view of the single multi-SAN certificate the agent provisions. */
 type HostCertState = "covered" | "expiring" | "failed" | "pending" | "unknown";
 
-function CertStatusDot({ state }: { state: HostCertState }) {
-  const map = {
-    covered: { cls: "bg-success", title: "Covered by the current certificate" },
-    expiring: { cls: "bg-yellow-500", title: "Covered, but the certificate is near expiry" },
-    failed: { cls: "bg-destructive", title: "The last issuance attempt failed" },
-    pending: {
-      cls: "bg-muted-foreground/50",
-      title: "Not in the current certificate — save to have it provisioned",
-    },
-    unknown: {
-      cls: "bg-muted-foreground/25",
-      title: "Unknown (node offline, or nothing issued yet)",
-    },
-  } as const;
-  const { cls, title } = map[state];
-  return (
-    <span className="inline-flex items-center" title={title}>
-      <span className={cn("h-2.5 w-2.5 rounded-full", cls)} />
-    </span>
-  );
-}
+const HOST_STATES: Record<
+  HostCertState,
+  { dot: string; cls: string; label: string; title: string }
+> = {
+  covered: {
+    dot: "bg-success",
+    cls: "text-success",
+    label: "Covered",
+    title: "Covered by the current certificate",
+  },
+  expiring: {
+    dot: "bg-amber-500",
+    cls: "text-amber-600 dark:text-amber-400",
+    label: "Expires soon",
+    title: "Covered, but the certificate is near expiry",
+  },
+  failed: {
+    dot: "bg-destructive",
+    cls: "text-destructive",
+    label: "Failed",
+    title: "The last issuance attempt failed",
+  },
+  pending: {
+    dot: "bg-muted-foreground/50",
+    cls: "text-muted-foreground",
+    label: "Pending",
+    title: "Not in the current certificate — save to have it provisioned",
+  },
+  unknown: {
+    dot: "bg-muted-foreground/25",
+    cls: "text-muted-foreground",
+    label: "Unknown",
+    title: "Unknown (node offline, or nothing issued yet)",
+  },
+};
+
+/** Overall panel state: the certificate's own state, or why there is none to show. */
+type CertPanelState = CertificateStatus["state"] | "offline" | "unreported";
+
+const CERT_PANEL_STATES: Record<
+  CertPanelState,
+  { icon: typeof Shield; chip: string; title: string }
+> = {
+  valid: { icon: ShieldCheck, chip: "bg-success/15 text-success", title: "Certificate active" },
+  expiring: {
+    icon: ShieldAlert,
+    chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    title: "Renewal due soon",
+  },
+  failed: { icon: ShieldX, chip: "bg-destructive/10 text-destructive", title: "Issuance failed" },
+  pending: {
+    icon: Shield,
+    chip: "bg-muted text-muted-foreground",
+    title: "Issuance pending",
+  },
+  offline: { icon: Shield, chip: "bg-muted text-muted-foreground", title: "Status unknown" },
+  unreported: {
+    icon: Shield,
+    chip: "bg-muted text-muted-foreground",
+    title: "Nothing reported yet",
+  },
+};
 
 function daysUntil(epochMs: number): number {
   return Math.ceil((epochMs - Date.now()) / 86_400_000);
@@ -410,82 +455,136 @@ function CertificatePanel({
 }) {
   if (hosts.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
-        No https services yet, so nothing is provisioned. Set a service's type to https on
-        the Services tab to have its hosts covered.
-      </p>
+      <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
+        No https services yet. Set a service's type to https on the Services tab and its
+        hosts appear here as the certificate covers them.
+      </div>
     );
   }
 
-  const covered = new Set((certificate?.domains ?? []).map((d) => d.toLowerCase()));
-  const known = online && certificate;
+  // Only trust the report while the node is online; a stale one is "unknown".
+  const cert = online ? certificate : undefined;
+  const covered = new Set((cert?.domains ?? []).map((d) => d.toLowerCase()));
+  const state: CertPanelState = !online ? "offline" : !cert ? "unreported" : cert.state;
+  const meta = CERT_PANEL_STATES[state];
 
   function hostState(host: string): HostCertState {
-    if (!known) return "unknown";
-    if (certificate.state === "failed") return "failed";
+    if (!cert) return "unknown";
+    if (cert.state === "failed") return "failed";
     if (!covered.has(host.toLowerCase())) return "pending";
-    if (certificate.state === "expiring") return "expiring";
-    if (certificate.state === "pending") return "pending";
+    if (cert.state === "expiring") return "expiring";
+    if (cert.state === "pending") return "pending";
     return "covered";
   }
 
-  const badge: { label: string; variant: "success" | "secondary" | "destructive" | "muted" } =
-    !known
-      ? { label: "unknown", variant: "muted" }
-      : certificate.state === "valid"
-        ? { label: "valid", variant: "success" }
-        : certificate.state === "expiring"
-          ? { label: "expiring", variant: "secondary" }
-          : certificate.state === "failed"
-            ? { label: "failed", variant: "destructive" }
-            : { label: "pending", variant: "muted" };
+  const subtitle = !online
+    ? "Node is offline — state refreshes when it reconnects."
+    : !cert
+      ? "The agent has not reported a certificate yet. Save to push this config to it."
+      : `${cert.staging ? "Staging" : "Production"} · checked ${relativeTime(cert.checkedAt)}`;
 
-  let summary: string;
-  if (!online) {
-    summary = "Node is offline, so its certificate state is unknown.";
-  } else if (!certificate) {
-    summary = "The agent has not reported a certificate yet. Save to push this config to it.";
-  } else if (certificate.notAfter) {
-    const left = daysUntil(certificate.notAfter);
-    const expiry = new Date(certificate.notAfter).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-    summary =
-      `${certificate.staging ? "Staging" : "Production"} · expires ${expiry} ` +
-      `(${left > 0 ? `in ${left} ${left === 1 ? "day" : "days"}` : "expired"})`;
-  } else {
-    summary = `${certificate.staging ? "Staging" : "Production"} · nothing issued yet`;
-  }
+  // 0 carries no expiry, same as absent: the agent has issued nothing yet.
+  const notAfter = cert?.notAfter || undefined;
+  const daysLeft = notAfter != null ? daysUntil(notAfter) : undefined;
+  const expiryDate =
+    notAfter != null
+      ? new Date(notAfter).toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        })
+      : undefined;
+  // Count what the rows below actually say, not bare SAN membership: a failed or
+  // pending certificate covers nothing regardless of the domains it lists.
+  const coveredCount = hosts.filter((h) => {
+    const s = hostState(h);
+    return s === "covered" || s === "expiring";
+  }).length;
 
   return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-sm font-medium">Certificate</span>
-        <Badge variant={badge.variant}>{badge.label}</Badge>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        {summary}
-        {known && ` · checked ${relativeTime(certificate.checkedAt)}`}
-      </p>
-      {known && certificate.error && (
-        <p className="text-xs break-words text-destructive">{certificate.error}</p>
-      )}
-      {known && certificate.staging !== staging && (
-        <p className="text-xs text-muted-foreground">
-          The certificate above came from the {certificate.staging ? "staging" : "production"}{" "}
-          directory. Save to re-issue from {staging ? "staging" : "production"}.
-        </p>
-      )}
-      <div className="space-y-1 pt-1">
-        {hosts.map((host) => (
-          <div key={host} className="flex items-center gap-2 text-xs">
-            <CertStatusDot state={hostState(host)} />
-            <span className="font-mono">{host}</span>
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex items-center justify-between gap-3 p-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-md", meta.chip)}>
+            <meta.icon className="h-4 w-4" />
           </div>
-        ))}
+          <div className="min-w-0">
+            <p className="text-sm leading-tight font-medium">{meta.title}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
+          </div>
+        </div>
+        {cert && (
+          <div className="shrink-0 text-right">
+            {daysLeft == null ? (
+              <>
+                <p className="text-sm font-semibold text-muted-foreground">Not issued</p>
+                <p className="text-[11px] text-muted-foreground">no expiry reported</p>
+              </>
+            ) : daysLeft > 0 ? (
+              <>
+                <p className="text-sm font-semibold tabular-nums">
+                  {daysLeft} {daysLeft === 1 ? "day" : "days"}
+                </p>
+                <p className="text-[11px] text-muted-foreground">until expiry · {expiryDate}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-destructive">Expired</p>
+                <p className="text-[11px] text-muted-foreground">{expiryDate}</p>
+              </>
+            )}
+          </div>
+        )}
       </div>
+
+      {cert?.error && (
+        <div className="border-t bg-destructive/5 px-3 py-2">
+          <p className="text-[11px] font-medium tracking-wider text-destructive uppercase">
+            Agent error
+          </p>
+          <p className="mt-1 font-mono text-xs break-words text-destructive/90">{cert.error}</p>
+        </div>
+      )}
+
+      {cert && cert.staging !== staging && (
+        <div className="flex items-start gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+          <span>
+            This certificate came from the {cert.staging ? "staging" : "production"} directory.
+            Save to re-issue from {staging ? "staging" : "production"}.
+          </span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-3 border-t bg-muted/40 px-3 py-1.5">
+        <span className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+          https hosts
+        </span>
+        {cert && (
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {coveredCount}/{hosts.length} covered
+          </span>
+        )}
+      </div>
+      <ul className="divide-y">
+        {hosts.map((host) => {
+          const s = HOST_STATES[hostState(host)];
+          return (
+            <li key={host} className="flex items-center justify-between gap-3 px-3 py-1.5">
+              <span className="min-w-0 truncate font-mono text-xs" title={host}>
+                {host}
+              </span>
+              <span
+                className={cn("flex shrink-0 items-center gap-1.5 text-[11px]", s.cls)}
+                title={s.title}
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full", s.dot)} />
+                {s.label}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
