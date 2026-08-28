@@ -4,6 +4,7 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-15",
   "compatibility_flags": ["nodejs_compat"],
+  "routes": [{ "pattern": "rathole.reall.icu", "custom_domain": true }],
   "assets": {
     "not_found_handling": "single-page-application",
     "binding": "ASSETS"
