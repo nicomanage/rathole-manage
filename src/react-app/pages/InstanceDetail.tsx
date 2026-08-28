@@ -932,7 +932,9 @@ function ConfigEditor({
    */
   function backendPanel({ service: svc, index: i }: { service: RatholeService; index: number }) {
     const hosts = serviceHttpHosts(svc);
-    const routing = svc.httpEnabled !== false;
+    // Unset means "on" only for a backend that already has hosts (configs from
+    // before the switch existed); a freshly added service starts unrouted.
+    const routing = svc.httpEnabled ?? hosts.length > 0;
     const source = certificateSource(svc);
     const cert = online ? certificate : undefined;
     const httpHostIssue =

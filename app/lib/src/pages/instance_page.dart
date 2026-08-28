@@ -963,7 +963,9 @@ class _ConfigEditorState extends State<ConfigEditor> {
               _switchRow(
                 label: 'Route HTTP',
                 icon: LucideIcons.globe,
-                value: svc.httpEnabled != false,
+                // Unset means "on" only for a backend that already has hosts;
+                // a freshly added service starts unrouted.
+                value: svc.httpEnabled ?? serviceHttpHosts(svc).isNotEmpty,
                 enabled: canEdit,
                 onChanged: (enabled) => setState(() {
                   svc.httpEnabled = enabled;
