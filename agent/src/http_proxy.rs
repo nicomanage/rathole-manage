@@ -28,8 +28,8 @@ pub struct HttpProxyConfig {
 mod imp {
     use super::{HttpProxyConfig, HttpRoute};
     use crate::acme::{
-        store_custom_certificate, AcmeIssuer, CertificateOutcome, CertificatePaths,
-        ChallengeStore, LetsEncryptConfig,
+        store_custom_certificate, AcmeIssuer, CertificateOutcome, CertificatePaths, ChallengeStore,
+        LetsEncryptConfig,
     };
     use crate::protocol::{truncate_cert_error, CertificateState, CertificateStatus};
     use anyhow::{bail, Context, Result as AnyResult};
@@ -383,8 +383,7 @@ mod imp {
                         issuer.ensure_certificate(lets_encrypt, &domains).await
                     };
                     let outcome = outcome.context("ensuring Let's Encrypt certificate")?;
-                    self.cert_status =
-                        Some(certificate_status(&outcome, lets_encrypt, &domains));
+                    self.cert_status = Some(certificate_status(&outcome, lets_encrypt, &domains));
                     renewed = outcome.renewed;
 
                     if let Some(error) = outcome.error.as_deref() {
