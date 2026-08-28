@@ -45,6 +45,14 @@ struct RunConfig {
 }
 
 fn main() -> Result<()> {
+    // The dependency graph enables both rustls backends (`ring` via the hub
+    // client, `aws-lc-rs` via instant-acme), so rustls refuses to guess a
+    // process-level CryptoProvider and panics at the first TLS handshake — the
+    // ACME order took the whole agent down. Pick one up front; a second install
+    // (tests, or a future dependency doing the same) is harmless.
+    #[cfg(unix)]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match std::env::args().nth(1).as_deref() {
         Some("login") | Some("enroll") => cmd_login(),
         None | Some("run") => cmd_run(),

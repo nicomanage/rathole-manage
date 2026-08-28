@@ -43,6 +43,10 @@ openssl = { version = "0.10", features = ["vendored"] }
 async-trait = "0.1"
 bytes = "1"
 instant-acme = { version = "0.8.5", features = ["rcgen"] }
+# instant-acme pulls rustls with the `aws-lc-rs` backend while other deps pull
+# `ring`; with both enabled rustls cannot pick a process-level CryptoProvider
+# on its own and panics at the first TLS use. main() installs `ring` explicitly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 pingora = { version = "0.8.1", default-features = false, features = ["proxy", "openssl"] }
 
 [profile.release]
