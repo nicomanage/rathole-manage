@@ -1041,7 +1041,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
               ],
             ] else ...[
               const SizedBox(height: 12),
-              if (isHttpRoutingOn(svc))
+              if ((_config.http?.enabled ?? false) && isHttpRoutingOn(svc))
                 // Routed backends are reachable only through the proxy; the
                 // bind is kept for when routing is paused, but not listened on.
                 Field(

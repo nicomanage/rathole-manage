@@ -101,8 +101,17 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
       bindAddr: legacyHttpService ? restorePublicBindAddr(service, i) : service.bindAddr,
       httpHost: undefined,
       httpHosts: httpHosts.length > 0 ? httpHosts : undefined,
-      // Only meaningful with hosts; defaults to on so older configs keep routing.
-      httpEnabled: httpHosts.length > 0 ? service.httpEnabled !== false : undefined,
+      // Defaults to on for services that already have hosts so older configs
+      // keep routing. An explicit `true` survives even without hosts: the
+      // operator just switched routing on and is about to type them, and
+      // normalizing mid-edit must not flip the switch back. (Saving that state
+      // is blocked by validation, so it never reaches the agent.)
+      httpEnabled:
+        service.httpEnabled === true
+          ? true
+          : httpHosts.length > 0
+            ? service.httpEnabled !== false
+            : undefined,
       customCertificate: customCertificate
         ? {
             enabled: !!customCertificate.enabled,
@@ -319,9 +328,12 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     seen.add(svc.name);
 
     // An HTTP-routed backend is reachable only through the proxy (the agent
-    // gives it an in-memory bind), so it has no public bind to validate.
+    // gives it an in-memory bind), so it has no public bind to validate — but
+    // only while the proxy itself is on; with it off the agent falls back to
+    // the public bind, which therefore has to be valid.
     const routingOn = isHttpRoutingOn(svc);
-    const publicBindError = routingOn ? null : validateHostPort(svc.bindAddr, "[::]:5000");
+    const publicBindError =
+      httpEnabled && routingOn ? null : validateHostPort(svc.bindAddr, "[::]:5000");
     if (publicBindError) {
       issues.push({
         path: `${base}.bindAddr`,

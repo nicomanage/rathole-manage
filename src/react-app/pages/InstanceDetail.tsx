@@ -391,7 +391,7 @@ const HOST_STATES: Record<
     dot: "bg-muted-foreground/50",
     cls: "text-muted-foreground",
     label: "Pending",
-    title: "Not in the current certificate — save to have it provisioned",
+    title: "Not issued yet, or not in the current certificate — save to have it provisioned",
   },
   unknown: {
     dot: "bg-muted-foreground/25",
@@ -854,7 +854,7 @@ function ConfigEditor({
                         </Select>
                       </TableCell>
                       <TableCell>
-                        {isHttpRoutingOn(svc) ? (
+                        {httpEnabled && isHttpRoutingOn(svc) ? (
                           <p
                             className="flex h-8 items-center gap-1.5 text-xs text-muted-foreground"
                             title="Reachable only through the HTTP proxy; pause routing on the HTTP tab to expose a port again"
@@ -966,9 +966,13 @@ function ConfigEditor({
             <div className="min-w-0">
               <CardTitle className="truncate font-mono text-base">{svc.name}</CardTitle>
               <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                {routing ? (
+                {routing && httpEnabled ? (
                   <span title={`Public bind ${svc.bindAddr || "(unset)"} is kept for when routing is paused`}>
                     HTTP only · no public port
+                  </span>
+                ) : routing ? (
+                  <span title="Routing is on, but the proxy is off, so the service is exposed on its public bind until the proxy is enabled">
+                    {svc.bindAddr} · proxy off
                   </span>
                 ) : (
                   svc.bindAddr
@@ -1017,8 +1021,8 @@ function ConfigEditor({
                 ) : (
                   <p className="text-xs text-muted-foreground">
                     Requests whose Host header matches are proxied straight into this service's
-                    tunnel; while routed it has no public port. Each host must resolve to this
-                    node.
+                    tunnel; while routed (and the proxy is on) it has no public port. Each host
+                    must resolve to this node.
                   </p>
                 )}
               </div>

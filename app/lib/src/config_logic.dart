@@ -87,8 +87,15 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
           : service.bindAddr
       ..httpHost = null
       ..httpHosts = httpHosts.isNotEmpty ? httpHosts : null
-      // Only meaningful with hosts; defaults to on so older configs keep routing.
-      ..httpEnabled = httpHosts.isNotEmpty ? service.httpEnabled != false : null
+      // Defaults to on for services that already have hosts so older configs
+      // keep routing. An explicit `true` survives even without hosts: the
+      // operator just switched routing on and is about to type them, and
+      // normalizing mid-edit must not flip the switch back.
+      ..httpEnabled = service.httpEnabled == true
+          ? true
+          : httpHosts.isNotEmpty
+              ? service.httpEnabled != false
+              : null
       ..customCertificate = customCertificate == null
           ? null
           : CustomCertificateConfig(
@@ -309,9 +316,12 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
 
     // An HTTP-routed backend is reachable only through the proxy (the agent
     // gives it an in-memory bind), so it has no public bind to validate.
+    // Only while the proxy itself is on; with it off the agent falls back to
+    // the public bind, which therefore has to be valid.
     final routingOn = isHttpRoutingOn(svc);
-    final publicBindError =
-        routingOn ? null : _validateHostPort(svc.bindAddr, '[::]:5000');
+    final publicBindError = httpEnabled && routingOn
+        ? null
+        : _validateHostPort(svc.bindAddr, '[::]:5000');
     if (publicBindError != null) {
       issues.add(ValidationIssue('$base.bindAddr',
           'Service "$label" public bind address $publicBindError'));

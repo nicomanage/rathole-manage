@@ -47,6 +47,7 @@ mod imp {
     use pingora::protocols::tls::{CustomALPN, ALPN};
     use pingora::protocols::Stream as PingoraIoStream;
     use pingora::proxy::{http_proxy_service_with_name_custom, ProcessCustomSession};
+    use pingora::server::configuration::ServerConf;
     use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
     use pingora::tls::ext;
     use pingora::tls::pkey::{PKey, Private};
@@ -355,7 +356,10 @@ mod imp {
         }
 
         pub async fn apply(&mut self, config: Option<HttpProxyConfig>) -> AnyResult<()> {
-            let Some(config) = config.filter(|c| !c.routes.is_empty()) else {
+            // `None` means the proxy is switched off. An enabled proxy with no
+            // routes still runs, so the operator's switch is observable and the
+            // first host can be added without a cold start.
+            let Some(config) = config else {
                 self.set_routes(&[]);
                 self.cert_status = None;
                 self.stop().await?;
@@ -555,12 +559,19 @@ mod imp {
         Ok(())
     }
 
+    /// Upper bound on a stop: the 1s grace period plus the 2s runtime shutdown
+    /// configured in `run_pingora`, with room for the thread to unwind.
+    const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
     fn stop_running(mut running: Running) -> AnyResult<()> {
         running.shutdown.notify_waiters();
-        let result = match running.done_rx.recv_timeout(Duration::from_secs(5)) {
+        let result = match running.done_rx.recv_timeout(STOP_TIMEOUT) {
             Ok(result) => result.map_err(anyhow::Error::msg),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                bail!("Pingora HTTP proxy did not stop within 5s")
+                bail!(
+                    "Pingora HTTP proxy did not stop within {}s",
+                    STOP_TIMEOUT.as_secs()
+                )
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Ok(()),
         };
@@ -575,7 +586,17 @@ mod imp {
         shared: Arc<SharedState>,
         shutdown: Arc<Notify>,
     ) -> std::result::Result<(), String> {
-        let mut server = Server::new(None).map_err(|e| format!("{e:#}"))?;
+        // Pingora's graceful stop otherwise sleeps its built-in 300s grace
+        // period before letting go of the ports, which is longer than any
+        // caller can wait: a certificate renewal restarts this proxy and the
+        // new instance cannot bind :80/:443 until the old one is gone. One
+        // second lets in-flight requests finish; the runtimes get two more.
+        let conf = ServerConf {
+            grace_period_seconds: Some(1),
+            graceful_shutdown_timeout_seconds: Some(2),
+            ..ServerConf::default()
+        };
+        let mut server = Server::new_with_opt_and_conf(None, conf);
         server.bootstrap();
         let router = HostRouter { shared };
         let on_custom: ProcessCustomSession<HostRouter, RatholeConnector> =
@@ -790,7 +811,7 @@ mod imp {
         }
 
         pub async fn apply(&mut self, config: Option<HttpProxyConfig>) -> Result<()> {
-            if config.as_ref().is_some_and(|c| !c.routes.is_empty()) {
+            if config.is_some() {
                 bail!("Pingora HTTP proxy is only available on Unix agent targets");
             }
             Ok(())

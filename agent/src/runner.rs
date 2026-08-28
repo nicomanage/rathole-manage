@@ -138,12 +138,13 @@ impl Runner {
         config: RatholeConfig,
         desired_state: Option<DesiredProcessState>,
     ) -> Result<()> {
+        let proxy_on = proxy_enabled(&config);
         let services = config
             .services
             .iter()
             .map(|svc| ServiceRef {
                 name: svc.name.clone(),
-                bind_addr: service_bind_addr(svc),
+                bind_addr: service_bind_addr(svc, proxy_on),
             })
             .collect::<Vec<_>>();
         let http_config =
@@ -294,8 +295,8 @@ fn service_type(kind: WireServiceType) -> ServiceType {
     }
 }
 
-fn service_config(service: RatholeService) -> ServerServiceConfig {
-    let bind_addr = service_bind_addr(&service);
+fn service_config(service: RatholeService, proxy_enabled: bool) -> ServerServiceConfig {
+    let bind_addr = service_bind_addr(&service, proxy_enabled);
     ServerServiceConfig {
         service_type: service_type(service.service_type),
         name: service.name,
@@ -309,15 +310,22 @@ fn virtual_bind_addr(service_name: &str) -> String {
     format!("memory://{service_name}")
 }
 
+/// Whether the node runs the HTTP proxy at all. With it off, no backend is
+/// routed no matter what its own switch says, so every service must keep its
+/// public bind or it would be reachable from nowhere.
+fn proxy_enabled(config: &RatholeConfig) -> bool {
+    config.http.as_ref().is_some_and(|http| http.enabled)
+}
+
 /// Where rathole binds this service on the server.
 ///
 /// A backend that is routed over HTTP is reachable only through the proxy: it
 /// gets an in-memory virtual bind instead of a public port, so the panel's
 /// `bindAddr` is kept (routing can be paused again) but never listened on.
-fn service_bind_addr(service: &RatholeService) -> String {
+fn service_bind_addr(service: &RatholeService, proxy_enabled: bool) -> String {
     match service.service_type {
         WireServiceType::Http | WireServiceType::Https => virtual_bind_addr(&service.name),
-        WireServiceType::Tcp if !service_http_hosts(service).is_empty() => {
+        WireServiceType::Tcp if proxy_enabled && !service_http_hosts(service).is_empty() => {
             virtual_bind_addr(&service.name)
         }
         WireServiceType::Tcp | WireServiceType::Udp => service.bind_addr.clone(),
@@ -361,7 +369,9 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
         .services
         .iter()
         .flat_map(|svc| {
-            let upstream_addr = service_bind_addr(svc);
+            // Only reached with the proxy on (checked above), so routed backends
+            // resolve to their virtual bind here.
+            let upstream_addr = service_bind_addr(svc, true);
             let service = svc.name.clone();
             service_http_hosts(svc)
                 .into_iter()
@@ -373,9 +383,9 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    if routes.is_empty() {
-        return Ok(None);
-    }
+    // No routes yet is not a reason to leave the proxy down: with the switch on
+    // it listens (answering 404 and ACME challenges) so that adding the first
+    // host is a config change, not a cold start.
 
     let mut custom_certificates = config
         .services
@@ -489,10 +499,11 @@ fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
         tls: websocket.tls.unwrap_or(false),
     });
 
+    let proxy_on = proxy_enabled(&config);
     let services = config
         .services
         .into_iter()
-        .map(|svc| (svc.name.clone(), service_config(svc)))
+        .map(|svc| (svc.name.clone(), service_config(svc, proxy_on)))
         .collect();
 
     Ok(ServerConfig {
@@ -571,6 +582,22 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_proxy_puts_routed_backends_back_on_their_public_bind() {
+        let mut config = config(
+            vec![service("web", WireServiceType::Tcp, "app.example.com")],
+            "admin@example.com",
+        );
+        config.http.as_mut().unwrap().enabled = false;
+
+        assert!(http_proxy_config(&config).unwrap().is_none());
+        let server = to_server_config(config).unwrap();
+        assert_eq!(
+            server.services.get("web").unwrap().bind_addr.as_str(),
+            "0.0.0.0:8080"
+        );
+    }
+
+    #[test]
     fn a_paused_backend_routes_nothing_and_needs_no_certificate() {
         let mut config = config(
             vec![
@@ -592,9 +619,13 @@ mod tests {
         );
         assert_eq!(proxy.https_hosts, vec!["live.example.com"]);
 
-        // Pausing the only routed backend turns the proxy off entirely.
+        // Pausing the only routed backend leaves the proxy up with no routes
+        // and nothing to issue a certificate for.
         config.services[1].http_enabled = Some(false);
-        assert!(http_proxy_config(&config).unwrap().is_none());
+        let proxy = http_proxy_config(&config).unwrap().unwrap();
+        assert!(proxy.routes.is_empty());
+        assert!(proxy.lets_encrypt.is_none());
+        assert!(proxy.https_bind_addr.is_none());
     }
 
     #[test]

@@ -88,7 +88,7 @@ mod imp {
     use anyhow::{bail, Context, Result};
     use instant_acme::{
         Account, AccountBuilder, AccountCredentials, AuthorizationStatus, ChallengeType,
-        Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
+        Identifier, LetsEncrypt, NewAccount, NewOrder, Order, OrderStatus, RetryPolicy,
     };
     use openssl::asn1::Asn1Time;
     use openssl::pkey::PKey;
@@ -288,7 +288,8 @@ mod imp {
                     .await
                     .context("waiting for ACME validations")?;
                 if status != OrderStatus::Ready {
-                    bail!("ACME order ended in unexpected state {status:?}");
+                    let details = failed_challenge_details(&mut order).await;
+                    bail!("ACME order ended in unexpected state {status:?}{details}");
                 }
 
                 let private_key_pem = order.finalize().await.context("finalizing ACME order")?;
@@ -355,6 +356,36 @@ mod imp {
 
     fn account_builder() -> Result<AccountBuilder> {
         Account::builder().context("building ACME account client")
+    }
+
+    /// Why validation failed, per identifier, straight from the CA — e.g.
+    /// `" (app.example.com: DNS problem: NXDOMAIN looking up A for app.example.com)"`.
+    /// Empty when the server attached no error, so it can be appended as-is.
+    async fn failed_challenge_details(order: &mut Order) -> String {
+        let mut details = Vec::new();
+        let mut authorizations = order.authorizations();
+        while let Some(result) = authorizations.next().await {
+            let Ok(authz) = result else {
+                continue;
+            };
+            let identifier = authz.identifier().to_string();
+            for challenge in &authz.challenges {
+                let Some(problem) = &challenge.error else {
+                    continue;
+                };
+                let detail = problem
+                    .detail
+                    .clone()
+                    .or_else(|| problem.r#type.clone())
+                    .unwrap_or_else(|| "unknown error".into());
+                details.push(format!("{identifier}: {detail}"));
+            }
+        }
+        if details.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", details.join("; "))
+        }
     }
 
     /// Look at the certificate on disk: is it usable, and when does it expire?
