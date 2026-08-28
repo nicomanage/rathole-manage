@@ -84,6 +84,9 @@ export function parseAgentReport(value: unknown): AgentReportPayload | null {
   if (status.type !== "status" || !PROCESS_STATES.has(status.processState as Instance["processState"])) {
     return null;
   }
+  // Older agents serialize an absent metrics block as `null` rather than
+  // omitting it (serde's Option default); treat both as "no metrics".
+  if (status.metrics === null) delete status.metrics;
   if (status.metrics !== undefined && !isRecord(status.metrics)) return null;
   if (status.serviceStatus !== undefined) {
     if (!isRecord(status.serviceStatus)) return null;

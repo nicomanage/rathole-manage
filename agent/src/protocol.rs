@@ -237,6 +237,9 @@ pub enum AgentToHub {
     },
     Status {
         process_state: ProcessState,
+        /// Omitted (not `null`) when absent: the hub's report validator only
+        /// accepts a missing key or an object here.
+        #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<Metrics>,
         #[serde(skip_serializing_if = "Option::is_none")]
         service_status: Option<HashMap<String, bool>>,
