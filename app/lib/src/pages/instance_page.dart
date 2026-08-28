@@ -963,9 +963,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
               _switchRow(
                 label: 'Route HTTP',
                 icon: LucideIcons.globe,
-                // Unset means "on" only for a backend that already has hosts;
-                // a freshly added service starts unrouted.
-                value: svc.httpEnabled ?? serviceHttpHosts(svc).isNotEmpty,
+                value: isHttpRoutingOn(svc),
                 enabled: canEdit,
                 onChanged: (enabled) => setState(() {
                   svc.httpEnabled = enabled;
@@ -1043,7 +1041,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
               ],
             ] else ...[
               const SizedBox(height: 12),
-              if (isHttpRouteActive(svc))
+              if (isHttpRoutingOn(svc))
                 // Routed backends are reachable only through the proxy; the
                 // bind is kept for when routing is paused, but not listened on.
                 Field(

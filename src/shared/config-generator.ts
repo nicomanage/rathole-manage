@@ -25,11 +25,20 @@ function hasHttpRoute(svc: RatholeService): boolean {
 }
 
 /**
- * Has HTTP hosts that the agent will actually route — configured and not
- * switched off. This is what certificate provisioning and validation key on.
+ * Whether the operator has HTTP routing switched on for this service. An unset
+ * flag means "on" only when hosts already exist (configs from before the
+ * switch), so a freshly added service starts off.
+ */
+export function isHttpRoutingOn(svc: RatholeService): boolean {
+  return svc.httpEnabled ?? hasHttpRoute(svc);
+}
+
+/**
+ * Has HTTP hosts that the agent will actually route — routing on and at least
+ * one host. This is what certificate provisioning keys on.
  */
 export function isHttpRouteActive(svc: RatholeService): boolean {
-  return hasHttpRoute(svc) && svc.httpEnabled !== false;
+  return hasHttpRoute(svc) && isHttpRoutingOn(svc);
 }
 
 function defaultPublicBindAddr(i: number): string {
@@ -311,9 +320,8 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
 
     // An HTTP-routed backend is reachable only through the proxy (the agent
     // gives it an in-memory bind), so it has no public bind to validate.
-    const publicBindError = isHttpRouteActive(svc)
-      ? null
-      : validateHostPort(svc.bindAddr, "[::]:5000");
+    const routingOn = isHttpRoutingOn(svc);
+    const publicBindError = routingOn ? null : validateHostPort(svc.bindAddr, "[::]:5000");
     if (publicBindError) {
       issues.push({
         path: `${base}.bindAddr`,
@@ -322,6 +330,14 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
 
     const httpHosts = serviceHttpHosts(svc);
+    // Routing on with nothing to route would silently fall back to the public
+    // bind on the node while the panel says there is none.
+    if (routingOn && httpHosts.length === 0) {
+      issues.push({
+        path: `${base}.httpHosts`,
+        message: `Service "${svc.name || i}" is routed over HTTP but has no hosts; add one or turn routing off.`,
+      });
+    }
     const customCertificate = svc.customCertificate;
     if (customCertificate?.enabled) {
       if (httpHosts.length === 0) {

@@ -23,10 +23,15 @@ bool isHttpService(RatholeService svc) => isHttpServiceType(svc.type);
 bool hasHttpRoute(RatholeService svc) =>
     serviceHttpHosts(svc).isNotEmpty;
 
-/// Has HTTP hosts the agent will actually route — configured and not switched
-/// off. Certificate provisioning and validation key on this.
+/// Whether the operator has HTTP routing switched on. An unset flag means "on"
+/// only when hosts already exist (configs from before the switch), so a
+/// freshly added service starts off.
+bool isHttpRoutingOn(RatholeService svc) => svc.httpEnabled ?? hasHttpRoute(svc);
+
+/// Has HTTP hosts the agent will actually route — routing on and at least one
+/// host. Certificate provisioning keys on this.
 bool isHttpRouteActive(RatholeService svc) =>
-    hasHttpRoute(svc) && svc.httpEnabled != false;
+    hasHttpRoute(svc) && isHttpRoutingOn(svc);
 
 String defaultPublicBindAddr(int i) => '0.0.0.0:${5000 + i}';
 
@@ -304,15 +309,21 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
 
     // An HTTP-routed backend is reachable only through the proxy (the agent
     // gives it an in-memory bind), so it has no public bind to validate.
-    final publicBindError = isHttpRouteActive(svc)
-        ? null
-        : _validateHostPort(svc.bindAddr, '[::]:5000');
+    final routingOn = isHttpRoutingOn(svc);
+    final publicBindError =
+        routingOn ? null : _validateHostPort(svc.bindAddr, '[::]:5000');
     if (publicBindError != null) {
       issues.add(ValidationIssue('$base.bindAddr',
           'Service "$label" public bind address $publicBindError'));
     }
 
     final httpHosts = serviceHttpHosts(svc);
+    // Routing on with nothing to route would silently fall back to the public
+    // bind on the node while the panel says there is none.
+    if (routingOn && httpHosts.isEmpty) {
+      issues.add(ValidationIssue('$base.httpHosts',
+          'Service "$label" is routed over HTTP but has no hosts; add one or turn routing off.'));
+    }
     final customCertificate = svc.customCertificate;
     if (customCertificate != null && customCertificate.enabled) {
       if (httpHosts.isEmpty) {

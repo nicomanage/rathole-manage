@@ -8,6 +8,7 @@ import {
   HTTP_PROXY_BIND_ADDR,
   HTTPS_PROXY_BIND_ADDR,
   isHttpRouteActive,
+  isHttpRoutingOn,
   normalizeConfig,
   parseHttpHostsInput,
   serviceHttpHosts,
@@ -853,7 +854,7 @@ function ConfigEditor({
                         </Select>
                       </TableCell>
                       <TableCell>
-                        {isHttpRouteActive(svc) ? (
+                        {isHttpRoutingOn(svc) ? (
                           <p
                             className="flex h-8 items-center gap-1.5 text-xs text-muted-foreground"
                             title="Reachable only through the HTTP proxy; pause routing on the HTTP tab to expose a port again"
@@ -932,9 +933,7 @@ function ConfigEditor({
    */
   function backendPanel({ service: svc, index: i }: { service: RatholeService; index: number }) {
     const hosts = serviceHttpHosts(svc);
-    // Unset means "on" only for a backend that already has hosts (configs from
-    // before the switch existed); a freshly added service starts unrouted.
-    const routing = svc.httpEnabled ?? hosts.length > 0;
+    const routing = isHttpRoutingOn(svc);
     const source = certificateSource(svc);
     const cert = online ? certificate : undefined;
     const httpHostIssue =
@@ -967,7 +966,7 @@ function ConfigEditor({
             <div className="min-w-0">
               <CardTitle className="truncate font-mono text-base">{svc.name}</CardTitle>
               <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                {routing && hosts.length > 0 ? (
+                {routing ? (
                   <span title={`Public bind ${svc.bindAddr || "(unset)"} is kept for when routing is paused`}>
                     HTTP only · no public port
                   </span>
