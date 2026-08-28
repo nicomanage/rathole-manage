@@ -103,6 +103,23 @@ Worker secrets. The Worker name must remain `rathole-manage`, matching
 The Durable Object migration in `wrangler.jsonc` is applied automatically on
 the first deployment. Run `npm run cf-typegen` after changing bindings.
 
+### Second deployment: `rathole.reall.icu`
+
+`wrangler.jsonc` also declares a `reallsys` environment that deploys the same
+Worker to a second Cloudflare account (its own custom domain, Durable Object
+namespace and D1 database). Bindings do not inherit into environments, so keep
+its `d1_databases` / `durable_objects` blocks in step with the top level. Deploy
+it with the matching Wrangler auth profile:
+
+```bash
+CLOUDFLARE_ENV=reallsys npm run build      # the Vite plugin flattens the env into dist/
+# d1 commands read wrangler.jsonc directly and need --env; deploy reads the
+# flattened dist/ config and must not be given one.
+npx wrangler d1 migrations apply STATUS_DB --remote --env reallsys --profile reallsys
+npx wrangler deploy --profile reallsys
+npx wrangler secret put SESSION_SECRET --profile reallsys   # first time only
+```
+
 ## Connect a rathole node (Rust agent)
 
 Nodes **self-enroll** — you don't create instances in the panel.

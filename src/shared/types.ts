@@ -157,6 +157,37 @@ export interface AgentMetrics {
   configInSync?: boolean;
 }
 
+/**
+ * State of the agent's Let's Encrypt certificate.
+ *
+ * - `valid` — issued and comfortably in date.
+ * - `expiring` — inside the renewal window; the agent renews on its next apply.
+ * - `failed` — the last issuance attempt errored; see `error`.
+ * - `pending` — configured, but nothing has been issued yet.
+ */
+export type CertificateState = "valid" | "expiring" | "failed" | "pending";
+
+/**
+ * Live state of the certificate an agent provisions for its HTTPS hosts.
+ *
+ * The agent issues a *single* multi-SAN certificate covering every HTTPS host,
+ * not one certificate per host, so this describes one certificate and the host
+ * set it covers.
+ */
+export interface CertificateStatus {
+  /** SAN set the current certificate covers, normalized and sorted. */
+  domains: string[];
+  /** Whether it came from the Let's Encrypt staging directory. */
+  staging: boolean;
+  state: CertificateState;
+  /** Expiry, epoch ms. Absent when nothing has been issued yet. */
+  notAfter?: number;
+  /** Agent-side error from the last failed issuance, truncated by the agent. */
+  error?: string;
+  /** Epoch ms of the last issuance attempt or freshness check. */
+  checkedAt: number;
+}
+
 /** An instance = one managed rathole server node. */
 export interface Instance {
   id: string;
@@ -188,6 +219,11 @@ export interface Instance {
    * service name. Used to compute deltas for monthly accounting.
    */
   traffic?: Record<string, TrafficStat>;
+  /**
+   * Live TLS certificate state reported by the agent. Volatile: cleared when the
+   * agent disconnects or goes stale, and absent while Let's Encrypt is off.
+   */
+  certificate?: CertificateStatus;
   /** Persisted per-month totals for this instance, keyed by UTC month "YYYY-MM". */
   monthlyTraffic?: Record<string, TrafficStat>;
   createdAt: number;
@@ -224,6 +260,11 @@ export type AgentToHub =
       serviceStatus?: Record<string, boolean>;
       /** Cumulative per-service traffic, keyed by service name. */
       traffic?: Record<string, TrafficStat>;
+      /**
+       * TLS certificate state. Omitted when Let's Encrypt is off, which the hub
+       * treats as "clear it" — same as `serviceStatus`.
+       */
+      certificate?: CertificateStatus;
     }
   | { type: "log"; line: string; stream?: "stdout" | "stderr"; ts?: number }
   | { type: "config_ack"; ok: boolean; error?: string }

@@ -1,4 +1,10 @@
-import type { AgentToHub, Instance, InstanceView } from "@shared/types";
+import type {
+  AgentToHub,
+  CertificateState,
+  CertificateStatus,
+  Instance,
+  InstanceView,
+} from "@shared/types";
 
 export type AgentStatusMessage = Extract<AgentToHub, { type: "status" }>;
 
@@ -19,6 +25,7 @@ interface StatusRow {
   metrics_json: string | null;
   service_status_json: string | null;
   traffic_json: string | null;
+  certificate_json: string | null;
 }
 
 interface MonthlyRow {
@@ -36,6 +43,7 @@ export interface StoredAgentState {
   serviceStatus?: Instance["serviceStatus"];
   traffic?: Instance["traffic"];
   monthlyTraffic?: Instance["monthlyTraffic"];
+  certificate?: Instance["certificate"];
 }
 
 const PROCESS_STATES = new Set<Instance["processState"]>([
@@ -45,8 +53,24 @@ const PROCESS_STATES = new Set<Instance["processState"]>([
   "unknown",
 ]);
 
+const CERTIFICATE_STATES = new Set<CertificateState>(["valid", "expiring", "failed", "pending"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Shape check for the agent's certificate report; see `CertificateStatus`. */
+function isCertificateStatus(value: unknown): value is CertificateStatus {
+  if (!isRecord(value)) return false;
+  if (!Array.isArray(value.domains) || value.domains.some((d) => typeof d !== "string")) {
+    return false;
+  }
+  if (typeof value.staging !== "boolean") return false;
+  if (!CERTIFICATE_STATES.has(value.state as CertificateState)) return false;
+  if (!Number.isSafeInteger(value.checkedAt)) return false;
+  if (value.notAfter !== undefined && !Number.isSafeInteger(value.notAfter)) return false;
+  if (value.error !== undefined && typeof value.error !== "string") return false;
+  return true;
 }
 
 /** Strictly validate the public agent report endpoint before touching D1. */
@@ -77,6 +101,7 @@ export function parseAgentReport(value: unknown): AgentReportPayload | null {
       }
     }
   }
+  if (status.certificate !== undefined && !isCertificateStatus(status.certificate)) return null;
   return value as unknown as AgentReportPayload;
 }
 
@@ -120,8 +145,8 @@ export async function syncAgentInstance(db: D1Database, inst: Instance): Promise
       .prepare(
         `INSERT OR IGNORE INTO agent_status
            (instance_id, reported_at, received_at, process_state, metrics_json,
-            service_status_json, traffic_json)
-         VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+            service_status_json, traffic_json, certificate_json)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
       )
       .bind(
         inst.id,
@@ -130,6 +155,7 @@ export async function syncAgentInstance(db: D1Database, inst: Instance): Promise
         inst.processState,
         inst.metrics ? JSON.stringify(inst.metrics) : null,
         inst.serviceStatus ? JSON.stringify(inst.serviceStatus) : null,
+        inst.certificate ? JSON.stringify(inst.certificate) : null,
       ),
     // This update deliberately keeps reported_at unchanged; the traffic trigger
     // only accumulates newer reports, so it safely restores the prior snapshot.
@@ -169,15 +195,16 @@ export async function storeAgentReport(
     .prepare(
       `INSERT INTO agent_status
          (instance_id, reported_at, received_at, process_state, metrics_json,
-          service_status_json, traffic_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+          service_status_json, traffic_json, certificate_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(instance_id) DO UPDATE SET
          reported_at = excluded.reported_at,
          received_at = excluded.received_at,
          process_state = excluded.process_state,
          metrics_json = COALESCE(excluded.metrics_json, agent_status.metrics_json),
          service_status_json = excluded.service_status_json,
-         traffic_json = COALESCE(excluded.traffic_json, agent_status.traffic_json)
+         traffic_json = COALESCE(excluded.traffic_json, agent_status.traffic_json),
+         certificate_json = excluded.certificate_json
        WHERE excluded.reported_at > agent_status.reported_at`,
     )
     .bind(
@@ -188,6 +215,8 @@ export async function storeAgentReport(
       status.metrics ? JSON.stringify(status.metrics) : null,
       status.serviceStatus ? JSON.stringify(status.serviceStatus) : null,
       status.traffic ? JSON.stringify(status.traffic) : null,
+      // Like service_status_json: an omitted certificate means "none", not "unchanged".
+      status.certificate ? JSON.stringify(status.certificate) : null,
     )
     .run();
 }
@@ -213,7 +242,7 @@ export async function readAgentStates(db: D1Database): Promise<Map<string, Store
   const results = await db.batch([
     db.prepare(
       `SELECT instance_id, reported_at, received_at, process_state,
-              metrics_json, service_status_json, traffic_json
+              metrics_json, service_status_json, traffic_json, certificate_json
        FROM agent_status`,
     ),
     db.prepare(
@@ -232,6 +261,7 @@ export async function readAgentStates(db: D1Database): Promise<Map<string, Store
       metrics: parseJson(row.metrics_json),
       serviceStatus: parseJson(row.service_status_json),
       traffic: parseJson(row.traffic_json),
+      certificate: parseJson(row.certificate_json),
     });
   }
   for (const row of monthly.results) {
@@ -263,6 +293,10 @@ export function mergeAgentState(
     metrics: useReport && report.metrics ? { ...inst.metrics, ...report.metrics } : inst.metrics,
     serviceStatus: connected
       ? useReport ? report.serviceStatus : inst.serviceStatus
+      : undefined,
+    // Volatile like serviceStatus: only meaningful while the agent is connected.
+    certificate: connected
+      ? useReport ? report.certificate : inst.certificate
       : undefined,
     traffic: useReport ? report.traffic ?? inst.traffic : inst.traffic,
     monthlyTraffic: useReport ? report.monthlyTraffic ?? inst.monthlyTraffic : inst.monthlyTraffic,

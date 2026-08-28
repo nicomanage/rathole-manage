@@ -42,5 +42,36 @@
       "tag": "v1",
       "new_sqlite_classes": ["RatholeHub"]
     }
-  ]
+  ],
+  // Second deployment on the reallsys Cloudflare account. Bindings do not
+  // inherit into environments, so every account-scoped resource is repeated.
+  // Build + deploy with:
+  //   CLOUDFLARE_ENV=reallsys npm run build && npx wrangler deploy --profile reallsys
+  "env": {
+    "reallsys": {
+      "name": "rathole-manage",
+      "routes": [
+        {
+          "pattern": "rathole.reall.icu",
+          "custom_domain": true
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "RATHOLE_HUB",
+            "class_name": "RatholeHub"
+          }
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "STATUS_DB",
+          "database_name": "rathole-manage-status",
+          "database_id": "538618c1-140b-47ca-9505-6fdaab78d084",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
 }

@@ -14,6 +14,7 @@ import {
 } from "@shared/config-generator";
 import type {
   AgentCommand,
+  CertificateStatus,
   HttpProxyConfig,
   InstanceView,
   RatholeConfig,
@@ -28,7 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -68,6 +69,11 @@ import {
   Pencil,
   Globe,
   LockKeyhole,
+  FileKey,
+  Shield,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldX,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -202,6 +208,7 @@ export function InstanceDetail() {
           initial={instance.config}
           serviceStatus={instance.serviceStatus}
           traffic={instance.traffic}
+          certificate={instance.certificate}
           online={instance.status === "online"}
           canEdit={isAdmin}
         />
@@ -344,11 +351,248 @@ function ServiceStatusDot({ state }: { state: "online" | "offline" | "unknown" }
   );
 }
 
+/** Which certificate an HTTP-routed backend is served with. */
+type CertificateSource = "letsencrypt" | "custom";
+
+function certificateSource(service: RatholeService): CertificateSource {
+  return service.customCertificate?.enabled ? "custom" : "letsencrypt";
+}
+
+/** Per-host view of the single multi-SAN certificate the agent provisions. */
+type HostCertState = "covered" | "expiring" | "failed" | "pending" | "unknown";
+
+const HOST_STATES: Record<
+  HostCertState,
+  { dot: string; cls: string; label: string; title: string }
+> = {
+  covered: {
+    dot: "bg-success",
+    cls: "text-success",
+    label: "Covered",
+    title: "Covered by the current certificate",
+  },
+  expiring: {
+    dot: "bg-amber-500",
+    cls: "text-amber-600 dark:text-amber-400",
+    label: "Expires soon",
+    title: "Covered, but the certificate is near expiry",
+  },
+  failed: {
+    dot: "bg-destructive",
+    cls: "text-destructive",
+    label: "Failed",
+    title: "The last issuance attempt failed",
+  },
+  pending: {
+    dot: "bg-muted-foreground/50",
+    cls: "text-muted-foreground",
+    label: "Pending",
+    title: "Not in the current certificate — save to have it provisioned",
+  },
+  unknown: {
+    dot: "bg-muted-foreground/25",
+    cls: "text-muted-foreground",
+    label: "Unknown",
+    title: "Unknown (node offline, or nothing issued yet)",
+  },
+};
+
+/** Overall panel state: the certificate's own state, or why there is none to show. */
+type CertPanelState = CertificateStatus["state"] | "offline" | "unreported";
+
+const CERT_PANEL_STATES: Record<
+  CertPanelState,
+  { icon: typeof Shield; chip: string; title: string }
+> = {
+  valid: { icon: ShieldCheck, chip: "bg-success/15 text-success", title: "Certificate active" },
+  expiring: {
+    icon: ShieldAlert,
+    chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    title: "Renewal due soon",
+  },
+  failed: { icon: ShieldX, chip: "bg-destructive/10 text-destructive", title: "Issuance failed" },
+  pending: {
+    icon: Shield,
+    chip: "bg-muted text-muted-foreground",
+    title: "Issuance pending",
+  },
+  offline: { icon: Shield, chip: "bg-muted text-muted-foreground", title: "Status unknown" },
+  unreported: {
+    icon: Shield,
+    chip: "bg-muted text-muted-foreground",
+    title: "Nothing reported yet",
+  },
+};
+
+function daysUntil(epochMs: number): number {
+  return Math.ceil((epochMs - Date.now()) / 86_400_000);
+}
+
+/**
+ * Live state of the Let's Encrypt certificate for this node.
+ *
+ * The agent issues one certificate covering every host that is not served by
+ * an operator-provided certificate, so a host's state is "is it in that
+ * certificate's SAN set, and how is that certificate doing".
+ */
+function CertificatePanel({
+  hosts,
+  certificate,
+  online,
+  staging,
+}: {
+  hosts: string[];
+  certificate?: CertificateStatus;
+  online: boolean;
+  staging: boolean;
+}) {
+  if (hosts.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
+        No backend uses Let's Encrypt yet. Assign HTTP hosts to a backend above and leave its
+        certificate on “Let's Encrypt”; the hosts appear here as the certificate covers them.
+      </div>
+    );
+  }
+
+  // Only trust the report while the node is online; a stale one is "unknown".
+  const cert = online ? certificate : undefined;
+  const covered = new Set((cert?.domains ?? []).map((d) => d.toLowerCase()));
+  const state: CertPanelState = !online ? "offline" : !cert ? "unreported" : cert.state;
+  const meta = CERT_PANEL_STATES[state];
+
+  function hostState(host: string): HostCertState {
+    if (!cert) return "unknown";
+    if (cert.state === "failed") return "failed";
+    if (!covered.has(host.toLowerCase())) return "pending";
+    if (cert.state === "expiring") return "expiring";
+    if (cert.state === "pending") return "pending";
+    return "covered";
+  }
+
+  const subtitle = !online
+    ? "Node is offline — state refreshes when it reconnects."
+    : !cert
+      ? "The agent has not reported a certificate yet. Save to push this config to it."
+      : `${cert.staging ? "Staging" : "Production"} · checked ${relativeTime(cert.checkedAt)}`;
+
+  // 0 carries no expiry, same as absent: the agent has issued nothing yet.
+  const notAfter = cert?.notAfter || undefined;
+  const daysLeft = notAfter != null ? daysUntil(notAfter) : undefined;
+  const expiryDate =
+    notAfter != null
+      ? new Date(notAfter).toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        })
+      : undefined;
+  // Count what the rows below actually say, not bare SAN membership: a failed or
+  // pending certificate covers nothing regardless of the domains it lists.
+  const coveredCount = hosts.filter((h) => {
+    const s = hostState(h);
+    return s === "covered" || s === "expiring";
+  }).length;
+
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <div className="flex items-center justify-between gap-3 p-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-md", meta.chip)}>
+            <meta.icon className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm leading-tight font-medium">{meta.title}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
+          </div>
+        </div>
+        {cert && (
+          <div className="shrink-0 text-right">
+            {daysLeft == null ? (
+              <>
+                <p className="text-sm font-semibold text-muted-foreground">Not issued</p>
+                <p className="text-[11px] text-muted-foreground">no expiry reported</p>
+              </>
+            ) : daysLeft > 0 ? (
+              <>
+                <p className="text-sm font-semibold tabular-nums">
+                  {daysLeft} {daysLeft === 1 ? "day" : "days"}
+                </p>
+                <p className="text-[11px] text-muted-foreground">until expiry · {expiryDate}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-destructive">Expired</p>
+                <p className="text-[11px] text-muted-foreground">{expiryDate}</p>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {cert?.error && (
+        <div className="border-t bg-destructive/5 px-3 py-2">
+          <p className="text-[11px] font-medium tracking-wider text-destructive uppercase">
+            Agent error
+          </p>
+          <p className="mt-1 font-mono text-xs break-words text-destructive/90">{cert.error}</p>
+        </div>
+      )}
+
+      {cert && cert.staging !== staging && (
+        <div className="flex items-start gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+          <span>
+            This certificate came from the {cert.staging ? "staging" : "production"} directory.
+            Save to re-issue from {staging ? "staging" : "production"}.
+          </span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-3 border-t bg-muted/40 px-3 py-1.5">
+        <span className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+          Let's Encrypt hosts
+        </span>
+        {cert && (
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {coveredCount}/{hosts.length} covered
+          </span>
+        )}
+      </div>
+      <ul className="divide-y">
+        {hosts.map((host) => {
+          const s = HOST_STATES[hostState(host)];
+          return (
+            <li key={host} className="flex items-center justify-between gap-3 px-3 py-1.5">
+              <span className="min-w-0 truncate font-mono text-xs" title={host}>
+                {host}
+              </span>
+              <span
+                className={cn("flex shrink-0 items-center gap-1.5 text-[11px]", s.cls)}
+                title={s.title}
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full", s.dot)} />
+                {s.label}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** Number of PEM blocks of `kind` in a pasted blob, for the editor's summary line. */
+function countPemBlocks(pem: string, kind: RegExp): number {
+  return (pem.match(kind) ?? []).length;
+}
+
 function ConfigEditor({
   id,
   initial,
   serviceStatus,
   traffic,
+  certificate,
   online,
   canEdit,
 }: {
@@ -356,6 +600,7 @@ function ConfigEditor({
   initial: RatholeConfig;
   serviceStatus?: Record<string, boolean>;
   traffic?: Record<string, TrafficStat>;
+  certificate?: CertificateStatus;
   online: boolean;
   canEdit: boolean;
 }) {
@@ -509,6 +754,22 @@ function ConfigEditor({
   const tcpBackends = config.services
     .map((service, index) => ({ service, index }))
     .filter(({ service }) => service.type === "tcp");
+  const httpEnabled = !!config.http?.enabled;
+  const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
+  const routedBackends = tcpBackends.filter(({ service }) => serviceHttpHosts(service).length > 0);
+  const customBackends = routedBackends.filter(
+    ({ service }) => certificateSource(service) === "custom",
+  );
+  // The agent provisions one certificate for exactly this set: every routed host
+  // not served by an operator-provided certificate (see http_proxy_config in
+  // agent/src/runner.rs).
+  const letsEncryptHosts = useMemo(
+    () =>
+      config.services
+        .filter((svc) => svc.type === "tcp" && certificateSource(svc) === "letsencrypt")
+        .flatMap((svc) => serviceHttpHosts(svc)),
+    [config.services],
+  );
 
   const validationPanel =
     issues.length > 0 ? (
@@ -575,7 +836,7 @@ function ConfigEditor({
                   ) : (
                     <TableHead className="min-w-40">Public bind (server)</TableHead>
                   )}
-                  {httpPanel && <TableHead className="min-w-80">HTTPS certificate</TableHead>}
+                  {httpPanel && <TableHead className="min-w-44">Certificate</TableHead>}
                   {!httpPanel && (
                     <>
                       <TableHead className="min-w-36">Token</TableHead>
@@ -595,12 +856,10 @@ function ConfigEditor({
                   const certificateEnabledIssue = issueByPath.get(
                     `services[${i}].customCertificate.enabled`,
                   );
-                  const certificatePemIssue = issueByPath.get(
-                    `services[${i}].customCertificate.certificatePem`,
-                  );
-                  const privateKeyPemIssue = issueByPath.get(
-                    `services[${i}].customCertificate.privateKeyPem`,
-                  );
+                  const customPemIssue =
+                    issueByPath.has(`services[${i}].customCertificate.certificatePem`) ||
+                    issueByPath.has(`services[${i}].customCertificate.privateKeyPem`);
+                  const routed = serviceHttpHosts(svc).length > 0;
                   return (
                     <TableRow key={i} className="align-top">
                       <TableCell className="text-center">
@@ -672,61 +931,47 @@ function ConfigEditor({
                         )}
                       </TableCell>
                       {httpPanel && (
-                        <TableCell className="space-y-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <Label>Custom certificate</Label>
-                            <Switch
-                              checked={!!svc.customCertificate?.enabled}
-                              disabled={!canEdit}
-                              onCheckedChange={(enabled) =>
-                                updateServiceCustomCertificate(i, { enabled })
-                              }
-                            />
-                          </div>
-                          {certificateEnabledIssue && (
-                            <p className="text-xs text-destructive">{certificateEnabledIssue}</p>
-                          )}
-                          {svc.customCertificate?.enabled && (
+                        <TableCell>
+                          {routed ? (
                             <>
-                              <Textarea
-                                aria-label={`${svc.name} certificate chain`}
-                                aria-invalid={!!certificatePemIssue}
-                                className={cn(
-                                  "min-h-28 font-mono text-xs",
-                                  certificatePemIssue && "border-destructive",
-                                )}
-                                placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
-                                value={svc.customCertificate.certificatePem}
+                              <Select
+                                value={certificateSource(svc)}
                                 disabled={!canEdit}
-                                onChange={(e) =>
+                                onValueChange={(v) =>
                                   updateServiceCustomCertificate(i, {
-                                    certificatePem: e.target.value,
+                                    enabled: (v as CertificateSource) === "custom",
                                   })
                                 }
-                              />
-                              {certificatePemIssue && (
-                                <p className="text-xs text-destructive">{certificatePemIssue}</p>
-                              )}
-                              <Textarea
-                                aria-label={`${svc.name} private key`}
-                                aria-invalid={!!privateKeyPemIssue}
-                                className={cn(
-                                  "min-h-28 font-mono text-xs",
-                                  privateKeyPemIssue && "border-destructive",
-                                )}
-                                placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
-                                value={svc.customCertificate.privateKeyPem}
-                                disabled={!canEdit}
-                                onChange={(e) =>
-                                  updateServiceCustomCertificate(i, {
-                                    privateKeyPem: e.target.value,
-                                  })
-                                }
-                              />
-                              {privateKeyPemIssue && (
-                                <p className="text-xs text-destructive">{privateKeyPemIssue}</p>
-                              )}
+                              >
+                                <SelectTrigger
+                                  className={cn(
+                                    "h-8",
+                                    (certificateEnabledIssue || customPemIssue) &&
+                                      "border-destructive",
+                                  )}
+                                  aria-label={`${svc.name} certificate source`}
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="letsencrypt">Let's Encrypt</SelectItem>
+                                  <SelectItem value="custom">Custom certificate</SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {certificateSource(svc) === "custom"
+                                  ? customPemIssue
+                                    ? "PEM missing — paste it under TLS certificates."
+                                    : "Uses the PEM pasted under TLS certificates."
+                                  : letsEncryptEnabled
+                                    ? "Covered by the automatic certificate."
+                                    : "Plain HTTP until automatic certificates are on."}
+                              </p>
                             </>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              Assign a host first.
+                            </span>
                           )}
                         </TableCell>
                       )}
@@ -868,19 +1113,28 @@ function ConfigEditor({
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
+              <div className="flex items-center gap-2">
                 <Globe className="h-4 w-4 text-muted-foreground" />
-                HTTP proxy
-              </CardTitle>
+                <CardTitle className="text-base">HTTP reverse proxy</CardTitle>
+              </div>
+              <CardDescription>
+                Runs the agent's embedded Pingora proxy on{" "}
+                <code className="font-mono">{HTTP_PROXY_BIND_ADDR}</code> and routes each request
+                by its Host header to the TCP backend that owns that host. Backends are the TCP
+                services from the Services tab; assign their hostnames below.
+              </CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <p className="text-sm text-muted-foreground sm:col-span-2">
-                HTTP host routing is layered on existing TCP services. Create and manage the TCP
-                listener in Services, then assign its hostnames below.
-              </p>
+            <CardContent>
               <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
                 <div>
-                  <Label>Pingora</Label>
+                  <Label>Enable the proxy</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {routedBackends.length > 0
+                      ? `${routedBackends.length} ${
+                          routedBackends.length === 1 ? "backend has" : "backends have"
+                        } hosts assigned. Turning this off keeps them configured but stops routing.`
+                      : "Hosts stay configured while the proxy is off; nothing is routed until it is on."}
+                  </p>
                   {issueByPath.has("http.enabled") && (
                     <p className="mt-1 text-xs text-destructive">
                       {issueByPath.get("http.enabled")}
@@ -888,38 +1142,234 @@ function ConfigEditor({
                   )}
                 </div>
                 <Switch
-                  checked={!!config.http?.enabled}
+                  checked={httpEnabled}
                   disabled={!canEdit}
                   onCheckedChange={(enabled) => updateHttp({ enabled })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-                <div>
-                  <Label className="flex items-center gap-2">
-                    <LockKeyhole className="h-4 w-4 text-muted-foreground" />
-                    Let's Encrypt
-                  </Label>
-                </div>
-                <Switch
-                  checked={!!config.http?.letsEncrypt?.enabled}
-                  disabled={!canEdit}
-                  onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>ACME email</Label>
-                <Input
-                  className="font-mono"
-                  placeholder="admin@example.com"
-                  value={config.http?.letsEncrypt?.email ?? ""}
-                  disabled={!canEdit || !config.http?.letsEncrypt?.enabled}
-                  onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
                 />
               </div>
             </CardContent>
           </Card>
 
           {serviceTable(tcpBackends, true)}
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <LockKeyhole className="h-4 w-4 text-muted-foreground" />
+                <CardTitle className="text-base">TLS certificates</CardTitle>
+              </div>
+              <CardDescription>
+                HTTPS is served on <code className="font-mono">{HTTPS_PROXY_BIND_ADDR}</code> and
+                the certificate is picked per host by SNI. Each backend chooses its source in the
+                table above: one automatic Let's Encrypt certificate covering every host that
+                needs one, or a PEM pair you paste here.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <section className="space-y-4">
+                <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                  <div>
+                    <Label>Automatic certificates (Let's Encrypt)</Label>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Issues and renews one certificate for the {letsEncryptHosts.length}{" "}
+                      {letsEncryptHosts.length === 1 ? "host" : "hosts"} on “Let's Encrypt”
+                      backends. Turning this on also enables the proxy, which answers the HTTP-01
+                      challenge on port 80.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={letsEncryptEnabled}
+                    disabled={!canEdit}
+                    onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
+                  />
+                </div>
+
+                {letsEncryptEnabled && (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>
+                          ACME account email <span className="text-destructive">*</span>
+                        </Label>
+                        <Input
+                          aria-invalid={issueByPath.has("http.letsEncrypt.email")}
+                          className={cn(
+                            "font-mono",
+                            issueByPath.has("http.letsEncrypt.email") && "border-destructive",
+                          )}
+                          placeholder="admin@example.com"
+                          value={config.http?.letsEncrypt?.email ?? ""}
+                          disabled={!canEdit}
+                          onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
+                        />
+                        {issueByPath.has("http.letsEncrypt.email") ? (
+                          <p className="text-xs text-destructive">
+                            {issueByPath.get("http.letsEncrypt.email")}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            Let's Encrypt sends expiry warnings here.
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex items-start justify-between gap-4 rounded-md border px-3 py-2">
+                        <div>
+                          <Label>Use the staging directory</Label>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Issues untrusted test certificates that browsers reject, but does not
+                            consume production rate limits. Switching environments uses a separate
+                            ACME account and certificate store.
+                          </p>
+                        </div>
+                        <Switch
+                          checked={!!config.http?.letsEncrypt?.staging}
+                          disabled={!canEdit}
+                          onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
+                        />
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground">
+                      HTTP-01 validation requires every host below to resolve to this node and
+                      port 80 to be reachable from the internet.
+                    </p>
+
+                    <CertificatePanel
+                      hosts={letsEncryptHosts}
+                      certificate={certificate}
+                      online={online}
+                      staging={!!config.http?.letsEncrypt?.staging}
+                    />
+                  </>
+                )}
+              </section>
+
+              <section className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <FileKey className="h-4 w-4 text-muted-foreground" />
+                  <h3 className="text-sm font-medium">Custom certificates</h3>
+                  <span className="text-xs text-muted-foreground">
+                    {customBackends.length === 0
+                      ? "none"
+                      : `${customBackends.length} ${
+                          customBackends.length === 1 ? "backend" : "backends"
+                        }`}
+                  </span>
+                </div>
+                {customBackends.length === 0 ? (
+                  <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
+                    No backend uses its own certificate. Switch a backend's certificate to
+                    “Custom certificate” in the table above to paste a PEM pair for its hosts.
+                  </div>
+                ) : (
+                  customBackends.map(({ service: svc, index: i }) => {
+                    const pem = svc.customCertificate ?? {
+                      enabled: true,
+                      certificatePem: "",
+                      privateKeyPem: "",
+                    };
+                    const certificatePemIssue = issueByPath.get(
+                      `services[${i}].customCertificate.certificatePem`,
+                    );
+                    const privateKeyPemIssue = issueByPath.get(
+                      `services[${i}].customCertificate.privateKeyPem`,
+                    );
+                    const chainCount = countPemBlocks(
+                      pem.certificatePem,
+                      /-----BEGIN CERTIFICATE-----/g,
+                    );
+                    const hasKey =
+                      /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(pem.privateKeyPem);
+                    const complete = chainCount > 0 && hasKey;
+                    return (
+                      <div key={i} className="overflow-hidden rounded-lg border">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2">
+                          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                            <span className="font-mono text-sm font-medium">{svc.name}</span>
+                            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                              {serviceHttpHosts(svc).join(", ")}
+                            </span>
+                          </div>
+                          <span
+                            className={cn(
+                              "flex shrink-0 items-center gap-1.5 text-[11px]",
+                              complete ? "text-success" : "text-muted-foreground",
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "h-1.5 w-1.5 rounded-full",
+                                complete ? "bg-success" : "bg-muted-foreground/50",
+                              )}
+                            />
+                            {complete
+                              ? `${chainCount} certificate${chainCount === 1 ? "" : "s"} in chain · key present`
+                              : "Incomplete — paste both parts"}
+                          </span>
+                        </div>
+                        <div className="grid gap-4 p-3 lg:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>Certificate chain (PEM)</Label>
+                            <Textarea
+                              aria-label={`${svc.name} certificate chain`}
+                              aria-invalid={!!certificatePemIssue}
+                              className={cn(
+                                "min-h-36 font-mono text-xs",
+                                certificatePemIssue && "border-destructive",
+                              )}
+                              placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                              value={pem.certificatePem}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                updateServiceCustomCertificate(i, {
+                                  certificatePem: e.target.value,
+                                })
+                              }
+                            />
+                            {certificatePemIssue ? (
+                              <p className="text-xs text-destructive">{certificatePemIssue}</p>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">
+                                Leaf certificate first, then any intermediates.
+                              </p>
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Private key (PEM)</Label>
+                            <Textarea
+                              aria-label={`${svc.name} private key`}
+                              aria-invalid={!!privateKeyPemIssue}
+                              className={cn(
+                                "min-h-36 font-mono text-xs",
+                                privateKeyPemIssue && "border-destructive",
+                              )}
+                              placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                              value={pem.privateKeyPem}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                updateServiceCustomCertificate(i, {
+                                  privateKeyPem: e.target.value,
+                                })
+                              }
+                            />
+                            {privateKeyPemIssue ? (
+                              <p className="text-xs text-destructive">{privateKeyPemIssue}</p>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">
+                                Stored on the node with owner-only permissions; the agent verifies
+                                it matches the certificate before serving.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </section>
+            </CardContent>
+          </Card>
+
           {validationPanel}
           {saveBar}
         </div>

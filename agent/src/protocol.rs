@@ -166,6 +166,59 @@ pub struct TrafficStat {
     pub bytes_out: u64,
 }
 
+/// State of the node's Let's Encrypt certificate. Mirrors `CertificateState` in
+/// `src/shared/types.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CertificateState {
+    /// Issued and comfortably in date.
+    Valid,
+    /// Inside the renewal window.
+    Expiring,
+    /// The last issuance attempt errored.
+    Failed,
+    /// Configured, but nothing issued yet.
+    Pending,
+}
+
+/// Live state of the single multi-SAN certificate this agent provisions.
+///
+/// `rename_all_fields` on `AgentToHub` only reaches that enum's own variant
+/// fields, so this struct needs its own `rename_all` — like [`Metrics`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateStatus {
+    /// SAN set the certificate covers, normalized and sorted.
+    pub domains: Vec<String>,
+    /// Whether it came from the Let's Encrypt staging directory.
+    pub staging: bool,
+    pub state: CertificateState,
+    /// Expiry, epoch ms. None when nothing has been issued yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<u64>,
+    /// Error from the last failed issuance, truncated to [`MAX_CERT_ERROR_LEN`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Epoch ms of the last issuance attempt or freshness check.
+    pub checked_at: u64,
+}
+
+/// ACME errors embed the account email and full order URLs, and the hub both
+/// persists and renders whatever arrives, so cap what goes on the wire.
+pub const MAX_CERT_ERROR_LEN: usize = 512;
+
+/// Truncate on a char boundary so the result stays valid UTF-8.
+pub fn truncate_cert_error(error: &str) -> String {
+    if error.len() <= MAX_CERT_ERROR_LEN {
+        return error.to_string();
+    }
+    let mut end = MAX_CERT_ERROR_LEN;
+    while end > 0 && !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &error[..end])
+}
+
 /// Messages this agent sends up to the hub.
 #[derive(Debug, Clone, Serialize)]
 #[serde(
@@ -187,6 +240,12 @@ pub enum AgentToHub {
         service_status: Option<HashMap<String, bool>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         traffic: Option<HashMap<String, TrafficStat>>,
+        /// Omitted when Let's Encrypt is off; the hub reads that as "clear it".
+        ///
+        /// Boxed to keep this variant from dwarfing the rest of the enum, the
+        /// same reason `HubToAgent::ApplyConfig` boxes its config.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        certificate: Option<Box<CertificateStatus>>,
     },
     Log {
         line: String,
@@ -235,4 +294,64 @@ pub enum HubToAgent {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_json(certificate: Option<CertificateStatus>) -> serde_json::Value {
+        let msg = AgentToHub::Status {
+            process_state: ProcessState::Running,
+            metrics: None,
+            service_status: None,
+            traffic: None,
+            certificate: certificate.map(Box::new),
+        };
+        serde_json::from_str(&serde_json::to_string(&msg).expect("serialize")).expect("valid JSON")
+    }
+
+    /// `rename_all_fields` on the enum does not reach nested structs, so this
+    /// pins the wire keys the hub reads (src/shared/types.ts).
+    #[test]
+    fn certificate_serializes_with_camel_case_keys() {
+        let json = status_json(Some(CertificateStatus {
+            domains: vec!["app.example.com".into()],
+            staging: true,
+            state: CertificateState::Expiring,
+            not_after: Some(1_700_000_000_000),
+            error: None,
+            checked_at: 1_699_000_000_000,
+        }));
+
+        assert_eq!(json["type"], "status");
+        assert_eq!(json["processState"], "running");
+        let cert = &json["certificate"];
+        assert_eq!(cert["domains"][0], "app.example.com");
+        assert_eq!(cert["staging"], true);
+        assert_eq!(cert["state"], "expiring");
+        assert_eq!(cert["notAfter"], 1_700_000_000_000u64);
+        assert_eq!(cert["checkedAt"], 1_699_000_000_000u64);
+        assert!(cert.get("error").is_none(), "empty error must be omitted");
+    }
+
+    #[test]
+    fn certificate_is_omitted_when_absent() {
+        let json = status_json(None);
+        assert!(json.get("certificate").is_none());
+    }
+
+    #[test]
+    fn short_errors_pass_through_untouched() {
+        assert_eq!(truncate_cert_error("boom"), "boom");
+    }
+
+    #[test]
+    fn long_errors_truncate_on_a_char_boundary() {
+        // Two bytes per char, so the cut lands mid-character without the guard.
+        let long = "é".repeat(MAX_CERT_ERROR_LEN);
+        let truncated = truncate_cert_error(&long);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.len() <= MAX_CERT_ERROR_LEN + '…'.len_utf8());
+    }
 }

@@ -210,7 +210,42 @@ describe("validateConfig", () => {
     expect(issues.some((i) => i.path === "http.httpsBindAddr" && /always listens/.test(i.message))).toBe(true);
   });
 
-  it("does not validate Let's Encrypt account email in the form", () => {
+  it("requires an ACME account email once Let's Encrypt can issue", () => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email: "" },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+  });
+
+  it("ignores a blank ACME email while nothing can be issued yet", () => {
+    // Let's Encrypt on but no HTTP-routed backend: the agent provisions nothing,
+    // so an empty email must not block saving a half-built config.
+    expect(
+      validateConfig(
+        config({
+          http: {
+            enabled: true,
+            bindAddr: HTTP_PROXY_BIND_ADDR,
+            httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+            letsEncrypt: { enabled: true, email: "" },
+          },
+          services: [{ name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22" }],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("ignores a blank ACME email when every backend brings its own certificate", () => {
     expect(
       validateConfig(
         config({
@@ -221,11 +256,44 @@ describe("validateConfig", () => {
             letsEncrypt: { enabled: true, email: "" },
           },
           services: [
-            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+            {
+              name: "web",
+              type: "tcp",
+              bindAddr: "0.0.0.0:8080",
+              httpHost: "app.example.com",
+              customCertificate: {
+                enabled: true,
+                certificatePem: "-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----",
+                privateKeyPem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+              },
+            },
           ],
         }),
       ),
     ).toEqual([]);
+  });
+
+  it.each([
+    ["no at sign", "adminexample.com"],
+    ["two at signs", "admin@@example.com"],
+    ["missing local part", "@example.com"],
+    ["bare domain label", "admin@example"],
+    ["embedded whitespace", "admin @example.com"],
+  ])("rejects a malformed ACME account email (%s)", (_label, email) => {
+    const issues = validateConfig(
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHost: "app.example.com" },
+        ],
+      }),
+    );
+    expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
   });
 
   it("accepts a custom PEM certificate for TCP HTTP routes", () => {

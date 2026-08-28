@@ -286,6 +286,8 @@ async fn run_daemon() -> Result<()> {
             let interval = status_interval();
             let mut ticker =
                 tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            // Skip missed ticks rather than firing a catch-up burst of reports.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
                 let mut guard = runner.lock().await;
@@ -293,6 +295,7 @@ async fn run_daemon() -> Result<()> {
                 let state = guard.state();
                 let statuses = guard.service_status();
                 let traffic = guard.traffic();
+                let certificate = guard.certificate_status();
                 drop(guard);
                 let metrics = Metrics {
                     cpu_percent: collector.cpu_percent(),
@@ -308,6 +311,7 @@ async fn run_daemon() -> Result<()> {
                     metrics: Some(metrics),
                     service_status: statuses,
                     traffic,
+                    certificate: certificate.map(Box::new),
                 };
                 spawn_status_report(cfg.clone(), msg);
             }
@@ -415,6 +419,7 @@ async fn handle_hub_message(
                 metrics: None,
                 service_status: guard.service_status(),
                 traffic: guard.traffic(),
+                certificate: guard.certificate_status().map(Box::new),
             };
             drop(guard);
             spawn_status_report(cfg.clone(), status);
@@ -461,15 +466,13 @@ async fn handle_hub_message(
                     guard.stop().await;
                     Ok(())
                 }
-                AgentCommand::Restart | AgentCommand::Reload => {
-                    guard.restart().await;
-                    Ok(())
-                }
+                AgentCommand::Restart | AgentCommand::Reload => guard.restart().await,
                 AgentCommand::Status => Ok(()),
             };
             let state = guard.state();
             let statuses = guard.service_status();
             let traffic = guard.traffic();
+            let certificate = guard.certificate_status();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
@@ -483,6 +486,7 @@ async fn handle_hub_message(
                     metrics: None,
                     service_status: statuses,
                     traffic,
+                    certificate: certificate.map(Box::new),
                 },
             );
         }
