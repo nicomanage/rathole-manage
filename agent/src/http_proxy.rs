@@ -442,6 +442,8 @@ mod imp {
                 .context("joining Pingora stop task")?
         }
 
+        /// Reap the proxy thread if it has exited on its own, returning its
+        /// error (if any). Leaves `running` alone while the thread is alive.
         pub fn refresh(&mut self) -> Option<String> {
             let status = match self.running.as_ref() {
                 Some(running) => match running.done_rx.try_recv() {
@@ -494,6 +496,12 @@ mod imp {
         }
 
         async fn ensure_running(&mut self, config: RuntimeConfig) -> AnyResult<()> {
+            // A proxy that died since the last apply must not pass as "already
+            // running with this config": reap it first so an identical config
+            // still brings it back.
+            if let Some(error) = self.refresh() {
+                tracing::warn!("HTTP proxy had exited ({error}); starting it again");
+            }
             if self
                 .running
                 .as_ref()
@@ -526,6 +534,31 @@ mod imp {
                 })
                 .context("spawning Pingora HTTP proxy thread")?;
 
+            // Failures that happen before the server loop settles — a
+            // certificate that does not load, a listener Pingora cannot bind —
+            // surface on `done_rx` within a few hundred milliseconds. Wait that
+            // long so they fail this call instead of being reported as a
+            // success and only noticed by the next status tick.
+            let started_at = std::time::Instant::now();
+            let mut thread = Some(thread);
+            while started_at.elapsed() < START_GRACE {
+                let early_exit = match done_rx.try_recv() {
+                    Err(TryRecvError::Empty) => {
+                        tokio::time::sleep(START_POLL).await;
+                        continue;
+                    }
+                    Ok(Err(message)) => message,
+                    Ok(Ok(())) => "Pingora HTTP proxy exited immediately".to_string(),
+                    Err(TryRecvError::Disconnected) => {
+                        "Pingora HTTP proxy exited without status".to_string()
+                    }
+                };
+                if let Some(thread) = thread.take() {
+                    let _ = thread.join();
+                }
+                bail!("starting Pingora HTTP proxy: {early_exit}");
+            }
+
             tracing::info!(
                 bind_addr = %config.bind_addr,
                 https_bind_addr = ?config.https_bind_addr,
@@ -535,7 +568,7 @@ mod imp {
                 config,
                 shutdown,
                 done_rx,
-                thread: Some(thread),
+                thread,
             });
             Ok(())
         }
@@ -615,6 +648,11 @@ mod imp {
     /// Upper bound on a stop: the 1s grace period plus the 2s runtime shutdown
     /// configured in `run_pingora`, with room for the thread to unwind.
     const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long `start` watches a freshly spawned proxy for an early exit
+    /// (certificate load or listener bind failures) before calling it started.
+    const START_GRACE: Duration = Duration::from_millis(750);
+    const START_POLL: Duration = Duration::from_millis(50);
 
     fn stop_running(mut running: Running) -> AnyResult<()> {
         running.shutdown.notify_waiters();
