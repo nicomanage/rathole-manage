@@ -72,7 +72,6 @@ import {
   FileKey,
   Shield,
   ShieldCheck,
-  ShieldAlert,
   ShieldX,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -158,6 +157,15 @@ export function InstanceDetail() {
               <Badge variant="destructive">config drift</Badge>
             )}
           </div>
+          {instance.lastError && (
+            <p
+              className="flex max-w-3xl items-start gap-1.5 text-xs text-destructive"
+              title="Reported by the agent with its last status; clears once a start completes cleanly"
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="font-mono break-all">{instance.lastError}</span>
+            </p>
+          )}
         </div>
         {isAdmin && (
           <div className="flex gap-2">
@@ -359,7 +367,7 @@ function certificateSource(service: RatholeService): CertificateSource {
 }
 
 /** Per-host view of the single multi-SAN certificate the agent provisions. */
-type HostCertState = "covered" | "expiring" | "failed" | "pending" | "unknown";
+type HostCertState = "covered" | "failed" | "pending" | "unknown";
 
 const HOST_STATES: Record<
   HostCertState,
@@ -370,12 +378,6 @@ const HOST_STATES: Record<
     cls: "text-success",
     label: "Covered",
     title: "Covered by the current certificate",
-  },
-  expiring: {
-    dot: "bg-amber-500",
-    cls: "text-amber-600 dark:text-amber-400",
-    label: "Expires soon",
-    title: "Covered, but the certificate is near expiry",
   },
   failed: {
     dot: "bg-destructive",
@@ -405,11 +407,6 @@ const CERT_PANEL_STATES: Record<
   { icon: typeof Shield; chip: string; title: string }
 > = {
   valid: { icon: ShieldCheck, chip: "bg-success/15 text-success", title: "Certificate active" },
-  expiring: {
-    icon: ShieldAlert,
-    chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-    title: "Renewal due soon",
-  },
   failed: { icon: ShieldX, chip: "bg-destructive/10 text-destructive", title: "Issuance failed" },
   pending: {
     icon: Shield,
@@ -465,7 +462,6 @@ function CertificatePanel({
     if (!cert) return "unknown";
     if (cert.state === "failed") return "failed";
     if (!covered.has(host.toLowerCase())) return "pending";
-    if (cert.state === "expiring") return "expiring";
     if (cert.state === "pending") return "pending";
     return "covered";
   }
@@ -489,10 +485,7 @@ function CertificatePanel({
       : undefined;
   // Count what the rows below actually say, not bare SAN membership: a failed or
   // pending certificate covers nothing regardless of the domains it lists.
-  const coveredCount = hosts.filter((h) => {
-    const s = hostState(h);
-    return s === "covered" || s === "expiring";
-  }).length;
+  const coveredCount = hosts.filter((h) => hostState(h) === "covered").length;
 
   return (
     <div className="overflow-hidden rounded-lg border">

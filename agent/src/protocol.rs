@@ -171,10 +171,10 @@ pub struct TrafficStat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CertificateState {
-    /// Issued and comfortably in date.
+    /// Issued and outside the renewal window. There is no "expiring" state: a
+    /// certificate inside the window is renewed on the spot, and a renewal that
+    /// fails is reported as `Failed` while the old certificate keeps serving.
     Valid,
-    /// Inside the renewal window.
-    Expiring,
     /// The last issuance attempt errored.
     Failed,
     /// Configured, but nothing issued yet.
@@ -246,6 +246,10 @@ pub enum AgentToHub {
         /// same reason `HubToAgent::ApplyConfig` boxes its config.
         #[serde(skip_serializing_if = "Option::is_none")]
         certificate: Option<Box<CertificateStatus>>,
+        /// Last start/stop/proxy error, if any (see `Runner::last_error`).
+        /// Omitted after a clean start; the hub reads that as "clear it".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Log {
         line: String,
@@ -307,6 +311,7 @@ mod tests {
             service_status: None,
             traffic: None,
             certificate: certificate.map(Box::new),
+            error: None,
         };
         serde_json::from_str(&serde_json::to_string(&msg).expect("serialize")).expect("valid JSON")
     }
@@ -318,7 +323,7 @@ mod tests {
         let json = status_json(Some(CertificateStatus {
             domains: vec!["app.example.com".into()],
             staging: true,
-            state: CertificateState::Expiring,
+            state: CertificateState::Valid,
             not_after: Some(1_700_000_000_000),
             error: None,
             checked_at: 1_699_000_000_000,
@@ -329,7 +334,7 @@ mod tests {
         let cert = &json["certificate"];
         assert_eq!(cert["domains"][0], "app.example.com");
         assert_eq!(cert["staging"], true);
-        assert_eq!(cert["state"], "expiring");
+        assert_eq!(cert["state"], "valid");
         assert_eq!(cert["notAfter"], 1_700_000_000_000u64);
         assert_eq!(cert["checkedAt"], 1_699_000_000_000u64);
         assert!(cert.get("error").is_none(), "empty error must be omitted");

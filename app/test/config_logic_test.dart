@@ -135,6 +135,82 @@ void main() {
     });
   });
 
+  group('ACME account email', () {
+    // A config where Let's Encrypt will actually issue a certificate: proxy
+    // enabled, one HTTP-routed service, and no custom certificate on it.
+    RatholeConfig issuingConfig(String email) => baseConfig()
+      ..http = HttpProxyConfig(
+        enabled: true,
+        bindAddr: httpProxyBindAddr,
+        httpsBindAddr: httpsProxyBindAddr,
+        letsEncrypt: LetsEncryptConfig(enabled: true, email: email),
+      )
+      ..services[0].httpHosts = ['app.example.com'];
+
+    bool hasEmailIssue(List<ValidationIssue> issues) =>
+        issues.any((i) => i.path == 'http.letsEncrypt.email');
+
+    test('requires an email when Let\'s Encrypt will issue', () {
+      final issues = validateConfig(issuingConfig(''));
+      expect(hasEmailIssue(issues), isTrue);
+    });
+
+    test('blank email is OK when no service has HTTP hosts', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          letsEncrypt: LetsEncryptConfig(enabled: true, email: ''),
+        );
+      final issues = validateConfig(config);
+      expect(issues, isEmpty);
+      expect(hasEmailIssue(issues), isFalse);
+    });
+
+    test('blank email is OK when every HTTP route has a custom certificate',
+        () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          httpsBindAddr: httpsProxyBindAddr,
+          letsEncrypt: LetsEncryptConfig(enabled: true, email: ''),
+        )
+        ..services[0].httpHosts = ['app.example.com']
+        ..services[0].customCertificate = CustomCertificateConfig(
+          enabled: true,
+          certificatePem:
+              '-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----',
+          privateKeyPem:
+              '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----',
+        );
+      final issues = validateConfig(config);
+      expect(issues, isEmpty);
+      expect(hasEmailIssue(issues), isFalse);
+    });
+
+    test('accepts a valid email when Let\'s Encrypt will issue', () {
+      final issues = validateConfig(issuingConfig('admin@example.com'));
+      expect(issues, isEmpty);
+      expect(hasEmailIssue(issues), isFalse);
+    });
+
+    const malformed = <(String, String)>[
+      ('no @ sign', 'adminexample.com'),
+      ('two @ signs', 'a@b@example.com'),
+      ('empty local part', '@example.com'),
+      ('domain without a dot', 'admin@example'),
+      ('embedded whitespace', 'admin @example.com'),
+    ];
+    for (final (description, email) in malformed) {
+      test('rejects malformed ACME email ($description)', () {
+        final issues = validateConfig(issuingConfig(email));
+        expect(hasEmailIssue(issues), isTrue,
+            reason: 'expected an email issue for "$email"');
+      });
+    }
+  });
+
   group('normalizeConfig', () {
     test('migrates legacy httpHost into httpHosts', () {
       final config = baseConfig()

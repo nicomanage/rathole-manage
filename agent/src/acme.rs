@@ -209,28 +209,39 @@ mod imp {
                 .with_context(|| format!("writing {}", domains_path.display()))?;
 
             // Re-read what we just wrote so the reported expiry describes the real
-            // certificate. If this says "not fresh" we would re-issue on every
-            // check and burn the duplicate-certificate limit, so treat it as fatal
-            // rather than looping.
-            let facts = inspect_certificate(&paths, &domains_path, &domains)?;
-            if !facts.fresh {
-                bail!(
-                    "just-issued certificate still looks stale ({}); refusing to re-issue in a loop",
-                    facts.reason.unwrap_or("unknown reason")
-                );
-            }
-
-            tracing::info!(
-                domains = ?domains,
-                staging = config.staging,
-                "issued Let's Encrypt certificate"
-            );
-            Ok(CertificateOutcome {
-                paths: Some(paths),
+            // certificate. Whatever this says, the files on disk *did* change, so
+            // `renewed` stays true and the proxy reloads them; a "still stale"
+            // verdict is reported as an error rather than re-issued here, which
+            // would burn the duplicate-certificate limit in a loop.
+            let issued = |facts: CertificateFacts, error: Option<String>| CertificateOutcome {
+                paths: Some(paths.clone()),
                 facts,
                 renewed: true,
-                error: None,
-            })
+                error,
+            };
+            match inspect_certificate(&paths, &domains_path, &domains) {
+                Ok(facts) if facts.fresh => {
+                    tracing::info!(
+                        domains = ?domains,
+                        staging = config.staging,
+                        "issued Let's Encrypt certificate"
+                    );
+                    Ok(issued(facts, None))
+                }
+                Ok(facts) => {
+                    let message = format!(
+                        "just-issued certificate still looks stale ({})",
+                        facts.reason.unwrap_or("unknown reason")
+                    );
+                    tracing::error!(domains = ?domains, "{message}");
+                    Ok(issued(facts, Some(message)))
+                }
+                Err(error) => {
+                    let message = format!("inspecting the just-issued certificate: {error:#}");
+                    tracing::error!(domains = ?domains, "{message}");
+                    Ok(issued(CertificateFacts::default(), Some(message)))
+                }
+            }
         }
 
         async fn issue_certificate(

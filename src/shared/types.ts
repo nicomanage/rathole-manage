@@ -161,11 +161,10 @@ export interface AgentMetrics {
  * State of the agent's Let's Encrypt certificate.
  *
  * - `valid` — issued and comfortably in date.
- * - `expiring` — inside the renewal window; the agent renews on its next apply.
  * - `failed` — the last issuance attempt errored; see `error`.
  * - `pending` — configured, but nothing has been issued yet.
  */
-export type CertificateState = "valid" | "expiring" | "failed" | "pending";
+export type CertificateState = "valid" | "failed" | "pending";
 
 /**
  * Live state of the certificate an agent provisions for its HTTPS hosts.
@@ -224,6 +223,12 @@ export interface Instance {
    * agent disconnects or goes stale, and absent while Let's Encrypt is off.
    */
   certificate?: CertificateStatus;
+  /**
+   * Last error the agent reported alongside its process state — typically an
+   * HTTP proxy that failed while rathole kept running, so `processState` alone
+   * would look healthy. Volatile like `serviceStatus`; absent after a clean start.
+   */
+  lastError?: string;
   /** Persisted per-month totals for this instance, keyed by UTC month "YYYY-MM". */
   monthlyTraffic?: Record<string, TrafficStat>;
   createdAt: number;
@@ -265,6 +270,8 @@ export type AgentToHub =
        * treats as "clear it" — same as `serviceStatus`.
        */
       certificate?: CertificateStatus;
+      /** See `Instance.lastError`. Omitted when the last start was clean. */
+      error?: string;
     }
   | { type: "log"; line: string; stream?: "stdout" | "stderr"; ts?: number }
   | { type: "config_ack"; ok: boolean; error?: string }

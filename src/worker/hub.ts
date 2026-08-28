@@ -107,6 +107,7 @@ function materialKey(inst: Instance): string {
     inst.certificate?.error ?? null,
     inst.certificate?.staging ?? null,
     inst.certificate?.domains ?? null,
+    inst.lastError ?? null,
   ]);
 }
 
@@ -453,6 +454,7 @@ export class RatholeHub extends DurableObject<Env> {
         inst.processState = "unknown";
         inst.serviceStatus = undefined;
         inst.certificate = undefined;
+        inst.lastError = undefined;
         await this.persist(inst);
         this.broadcastBrowsers({ type: "instance_update", instance: toView(inst) });
       }
@@ -513,6 +515,7 @@ export class RatholeHub extends DurableObject<Env> {
         // Assigned unconditionally, like serviceStatus: an agent that omits it
         // (Let's Encrypt switched off) means "no certificate", not "unchanged".
         inst.certificate = msg.certificate;
+        inst.lastError = msg.error;
         if (msg.traffic) {
           // Fold the delta into this month's total before overwriting the snapshot.
           // The latest snapshot/accounting state is mirrored in the WebSocket

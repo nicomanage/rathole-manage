@@ -371,6 +371,9 @@ mod imp {
             }
 
             if let Some(lets_encrypt) = config.lets_encrypt.as_ref() {
+                // Cleared up front so an early error below cannot leave a report
+                // describing the previous config's domains or staging flag.
+                self.cert_status = None;
                 self.ensure_http_listener(&config.bind_addr).await?;
                 let domains = route_domains(&config.https_hosts);
                 if domains.is_empty() {
@@ -709,15 +712,15 @@ mod imp {
         lets_encrypt: &LetsEncryptConfig,
         domains: &[String],
     ) -> CertificateStatus {
+        // A certificate inside its renewal window is renewed on the spot, so a
+        // successful outcome is always fresh: there is no "expiring" state to
+        // report, only "renewal failed" (which keeps serving the old one).
         let state = if outcome.error.is_some() {
             CertificateState::Failed
         } else if outcome.facts.not_after_ms.is_none() {
             CertificateState::Pending
-        } else if outcome.facts.fresh {
-            CertificateState::Valid
         } else {
-            // Parsed, not fresh, and we did not just replace it.
-            CertificateState::Expiring
+            CertificateState::Valid
         };
         // Describe the certificate we are actually serving, not the set that was
         // requested: a failed re-issue falls back to the previous certificate,

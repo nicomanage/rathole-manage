@@ -296,6 +296,7 @@ async fn run_daemon() -> Result<()> {
                 let statuses = guard.service_status();
                 let traffic = guard.traffic();
                 let certificate = guard.certificate_status();
+                let error = guard.last_error();
                 drop(guard);
                 let metrics = Metrics {
                     cpu_percent: collector.cpu_percent(),
@@ -312,6 +313,7 @@ async fn run_daemon() -> Result<()> {
                     service_status: statuses,
                     traffic,
                     certificate: certificate.map(Box::new),
+                    error,
                 };
                 spawn_status_report(cfg.clone(), msg);
             }
@@ -420,6 +422,7 @@ async fn handle_hub_message(
                 service_status: guard.service_status(),
                 traffic: guard.traffic(),
                 certificate: guard.certificate_status().map(Box::new),
+                error: guard.last_error(),
             };
             drop(guard);
             spawn_status_report(cfg.clone(), status);
@@ -473,6 +476,7 @@ async fn handle_hub_message(
             let statuses = guard.service_status();
             let traffic = guard.traffic();
             let certificate = guard.certificate_status();
+            let error = guard.last_error();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
@@ -487,6 +491,7 @@ async fn handle_hub_message(
                     service_status: statuses,
                     traffic,
                     certificate: certificate.map(Box::new),
+                    error,
                 },
             );
         }

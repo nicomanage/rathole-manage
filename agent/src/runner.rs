@@ -19,8 +19,9 @@ use crate::http_proxy::{
     HttpProxyConfig as AgentHttpProxyConfig, HttpProxyRunner, HttpRoute,
 };
 use crate::protocol::{
-    CertificateStatus, DesiredProcessState, ProcessState, RatholeConfig, RatholeService,
-    ServiceRef, ServiceType as WireServiceType, TrafficStat, TransportType as WireTransportType,
+    truncate_cert_error, CertificateStatus, DesiredProcessState, ProcessState, RatholeConfig,
+    RatholeService, ServiceRef, ServiceType as WireServiceType, TrafficStat,
+    TransportType as WireTransportType,
 };
 
 const HTTP_PROXY_BIND_ADDR: &str = "[::]:80";
@@ -180,8 +181,13 @@ impl Runner {
         };
         let started = self.start_rathole().await;
         match (started, proxy_error) {
-            (Err(e), _) => Err(e),
+            (Err(e), _) => {
+                self.last_error = Some(format!("{e:#}"));
+                Err(e)
+            }
             (Ok(()), Some(e)) => {
+                // rathole is up, so `state()` says Running; this is what tells the
+                // hub that HTTPS is nevertheless down (see `last_error()`).
                 self.last_error = Some(format!("{e:#}"));
                 Err(e)
             }
@@ -254,11 +260,10 @@ impl Runner {
     pub async fn restart(&mut self) -> Result<()> {
         self.stop().await;
         if let Err(e) = self.start().await {
-            // Previously swallowed into last_error, where nothing ever read the
-            // message. Log it so it reaches the panel's live log stream, and
-            // return it so config acks and command results stop claiming success.
+            // `start` has already recorded it in last_error. Log it so it reaches
+            // the panel's live log stream, and return it so config acks and
+            // command results stop claiming success.
             tracing::error!("restart failed: {e:#}");
-            self.last_error = Some(format!("{e:#}"));
             return Err(e);
         }
         Ok(())
@@ -267,6 +272,13 @@ impl Runner {
     /// Certificate state to report to the hub, if the proxy has any.
     pub fn certificate_status(&self) -> Option<CertificateStatus> {
         self.http_proxy.certificate_status()
+    }
+
+    /// Last error worth showing next to the process state: a failed start or
+    /// stop, or an HTTP proxy that failed while rathole itself kept running.
+    /// Cleared once everything comes up cleanly.
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.as_deref().map(truncate_cert_error)
     }
 }
 
