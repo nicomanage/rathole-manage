@@ -54,6 +54,8 @@ class RatholeService {
   String type;
   String bindAddr;
   List<String>? httpHosts;
+  /// `false` keeps the hosts configured but routes nothing for them.
+  bool? httpEnabled;
   String? httpHost;
   CustomCertificateConfig? customCertificate;
   String? token;
@@ -64,6 +66,7 @@ class RatholeService {
     required this.type,
     required this.bindAddr,
     this.httpHosts,
+    this.httpEnabled,
     this.httpHost,
     this.customCertificate,
     this.token,
@@ -75,6 +78,7 @@ class RatholeService {
         type: json['type'] as String? ?? 'tcp',
         bindAddr: json['bindAddr'] as String? ?? '',
         httpHosts: (json['httpHosts'] as List?)?.cast<String>(),
+        httpEnabled: json['httpEnabled'] as bool?,
         httpHost: json['httpHost'] as String?,
         customCertificate: json['customCertificate'] == null
             ? null
@@ -89,6 +93,7 @@ class RatholeService {
         'type': type,
         'bindAddr': bindAddr,
         if (httpHosts != null) 'httpHosts': httpHosts,
+        if (httpEnabled != null) 'httpEnabled': httpEnabled,
         if (httpHost != null) 'httpHost': httpHost,
         if (customCertificate != null)
           'customCertificate': customCertificate!.toJson(),

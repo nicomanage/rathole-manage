@@ -36,6 +36,8 @@ pub struct RatholeService {
     pub bind_addr: String,
     pub http_host: Option<String>,
     pub http_hosts: Option<Vec<String>>,
+    /// `Some(false)` keeps the hosts configured but routes nothing for them.
+    pub http_enabled: Option<bool>,
     pub custom_certificate: Option<CustomCertificateConfig>,
     pub token: Option<String>,
     pub nodelay: Option<bool>,

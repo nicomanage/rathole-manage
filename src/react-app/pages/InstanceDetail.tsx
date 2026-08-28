@@ -7,6 +7,7 @@ import {
   generateClientServiceToml,
   HTTP_PROXY_BIND_ADDR,
   HTTPS_PROXY_BIND_ADDR,
+  isHttpRouteActive,
   normalizeConfig,
   parseHttpHostsInput,
   serviceHttpHosts,
@@ -425,14 +426,40 @@ function daysUntil(epochMs: number): number {
   return Math.ceil((epochMs - Date.now()) / 86_400_000);
 }
 
+/** Overall state to summarize the Let's Encrypt certificate under. */
+function certPanelState(cert: CertificateStatus | undefined, online: boolean): CertPanelState {
+  return !online ? "offline" : !cert ? "unreported" : cert.state;
+}
+
 /**
- * Live state of the Let's Encrypt certificate for this node.
- *
- * The agent issues one certificate covering every host that is not served by
- * an operator-provided certificate, so a host's state is "is it in that
- * certificate's SAN set, and how is that certificate doing".
+ * State of one host against the single multi-SAN certificate the agent
+ * provisions: is it in that certificate's SAN set, and how is that certificate
+ * doing. `cert` must already be gated on the node being online.
  */
-function CertificatePanel({
+function hostCertState(host: string, cert: CertificateStatus | undefined): HostCertState {
+  if (!cert) return "unknown";
+  if (cert.state === "failed") return "failed";
+  const wanted = host.toLowerCase();
+  if (!cert.domains.some((d) => d.toLowerCase() === wanted)) return "pending";
+  if (cert.state === "pending") return "pending";
+  return "covered";
+}
+
+function HostCertBadge({ state }: { state: HostCertState }) {
+  const s = HOST_STATES[state];
+  return (
+    <span className={cn("flex shrink-0 items-center gap-1.5 text-[11px]", s.cls)} title={s.title}>
+      <span className={cn("h-1.5 w-1.5 rounded-full", s.dot)} />
+      {s.label}
+    </span>
+  );
+}
+
+/**
+ * The Let's Encrypt certificate for this node, as one thing: state, expiry,
+ * last error. Per-host coverage lives on each backend's panel.
+ */
+function CertificateSummary({
   hosts,
   certificate,
   online,
@@ -446,25 +473,16 @@ function CertificatePanel({
   if (hosts.length === 0) {
     return (
       <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
-        No backend uses Let's Encrypt yet. Assign HTTP hosts to a backend above and leave its
-        certificate on “Let's Encrypt”; the hosts appear here as the certificate covers them.
+        No backend is routed with Let's Encrypt yet. Turn on routing for a backend below and
+        leave its certificate on “Let's Encrypt”; one certificate then covers all such hosts.
       </div>
     );
   }
 
   // Only trust the report while the node is online; a stale one is "unknown".
   const cert = online ? certificate : undefined;
-  const covered = new Set((cert?.domains ?? []).map((d) => d.toLowerCase()));
-  const state: CertPanelState = !online ? "offline" : !cert ? "unreported" : cert.state;
+  const state = certPanelState(cert, online);
   const meta = CERT_PANEL_STATES[state];
-
-  function hostState(host: string): HostCertState {
-    if (!cert) return "unknown";
-    if (cert.state === "failed") return "failed";
-    if (!covered.has(host.toLowerCase())) return "pending";
-    if (cert.state === "pending") return "pending";
-    return "covered";
-  }
 
   const subtitle = !online
     ? "Node is offline — state refreshes when it reconnects."
@@ -483,9 +501,9 @@ function CertificatePanel({
           day: "numeric",
         })
       : undefined;
-  // Count what the rows below actually say, not bare SAN membership: a failed or
+  // Count what the backend panels say, not bare SAN membership: a failed or
   // pending certificate covers nothing regardless of the domains it lists.
-  const coveredCount = hosts.filter((h) => hostState(h) === "covered").length;
+  const coveredCount = hosts.filter((h) => hostCertState(h, cert) === "covered").length;
 
   return (
     <div className="overflow-hidden rounded-lg border">
@@ -544,7 +562,8 @@ function CertificatePanel({
 
       <div className="flex items-center justify-between gap-3 border-t bg-muted/40 px-3 py-1.5">
         <span className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
-          Let's Encrypt hosts
+          {hosts.length} Let's Encrypt {hosts.length === 1 ? "host" : "hosts"} across the
+          backends below
         </span>
         {cert && (
           <span className="text-[11px] tabular-nums text-muted-foreground">
@@ -552,25 +571,6 @@ function CertificatePanel({
           </span>
         )}
       </div>
-      <ul className="divide-y">
-        {hosts.map((host) => {
-          const s = HOST_STATES[hostState(host)];
-          return (
-            <li key={host} className="flex items-center justify-between gap-3 px-3 py-1.5">
-              <span className="min-w-0 truncate font-mono text-xs" title={host}>
-                {host}
-              </span>
-              <span
-                className={cn("flex shrink-0 items-center gap-1.5 text-[11px]", s.cls)}
-                title={s.title}
-              >
-                <span className={cn("h-1.5 w-1.5 rounded-full", s.dot)} />
-                {s.label}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
     </div>
   );
 }
@@ -749,17 +749,17 @@ function ConfigEditor({
     .filter(({ service }) => service.type === "tcp");
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
-  const routedBackends = tcpBackends.filter(({ service }) => serviceHttpHosts(service).length > 0);
-  const customBackends = routedBackends.filter(
-    ({ service }) => certificateSource(service) === "custom",
-  );
-  // The agent provisions one certificate for exactly this set: every routed host
-  // not served by an operator-provided certificate (see http_proxy_config in
-  // agent/src/runner.rs).
+  const routedBackends = tcpBackends.filter(({ service }) => isHttpRouteActive(service));
+  // The agent provisions one certificate for exactly this set: every actively
+  // routed host not served by an operator-provided certificate (see
+  // http_proxy_config in agent/src/runner.rs).
   const letsEncryptHosts = useMemo(
     () =>
       config.services
-        .filter((svc) => svc.type === "tcp" && certificateSource(svc) === "letsencrypt")
+        .filter(
+          (svc) =>
+            svc.type === "tcp" && isHttpRouteActive(svc) && certificateSource(svc) === "letsencrypt",
+        )
         .flatMap((svc) => serviceHttpHosts(svc)),
     [config.services],
   );
@@ -788,22 +788,13 @@ function ConfigEditor({
     </div>
   ) : null;
 
-  function serviceTable(
-    entries: Array<{ service: RatholeService; index: number }>,
-    httpPanel: boolean,
-  ) {
+  function serviceTable(entries: Array<{ service: RatholeService; index: number }>) {
     return (
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">
-            {httpPanel ? "TCP backends" : "TCP/UDP services"} ({entries.length})
-          </CardTitle>
-          {canEdit && !httpPanel && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={addService}
-            >
+          <CardTitle className="text-base">TCP/UDP services ({entries.length})</CardTitle>
+          {canEdit && (
+            <Button variant="outline" size="sm" onClick={addService}>
               <Plus className="h-4 w-4" /> Add service
             </Button>
           )}
@@ -811,9 +802,7 @@ function ConfigEditor({
         <CardContent className="overflow-x-auto p-0">
           {entries.length === 0 ? (
             <p className="px-6 pb-6 text-sm text-muted-foreground">
-              {httpPanel
-                ? "No TCP services. Add one in the Services tab before assigning HTTP hosts."
-                : "No TCP/UDP services. Add one to forward a port from behind NAT."}
+              No TCP/UDP services. Add one to forward a port from behind NAT.
             </p>
           ) : (
             <Table>
@@ -821,38 +810,17 @@ function ConfigEditor({
                 <TableRow>
                   <TableHead className="w-16 text-center">Online</TableHead>
                   <TableHead className="min-w-32">Name</TableHead>
-                  <TableHead className={httpPanel ? "min-w-40" : "w-24"}>
-                    {httpPanel ? "TCP bind" : "Type"}
-                  </TableHead>
-                  {httpPanel ? (
-                    <TableHead className="min-w-52">HTTP hosts</TableHead>
-                  ) : (
-                    <TableHead className="min-w-40">Public bind (server)</TableHead>
-                  )}
-                  {httpPanel && <TableHead className="min-w-44">Certificate</TableHead>}
-                  {!httpPanel && (
-                    <>
-                      <TableHead className="min-w-36">Token</TableHead>
-                      <TableHead className="w-20 text-center">nodelay</TableHead>
-                    </>
-                  )}
+                  <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="min-w-40">Public bind (server)</TableHead>
+                  <TableHead className="min-w-36">Token</TableHead>
+                  <TableHead className="w-20 text-center">nodelay</TableHead>
                   <TableHead className="w-28 text-right">Traffic</TableHead>
-                  {canEdit && !httpPanel && <TableHead className="w-12" />}
+                  {canEdit && <TableHead className="w-12" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {entries.map(({ service: svc, index: i }) => {
                   const publicBindIssue = issueByPath.get(`services[${i}].bindAddr`);
-                  const httpHostIssue =
-                    issueByPath.get(`services[${i}].httpHosts`) ??
-                    issueByPath.get(`services[${i}].httpHost`);
-                  const certificateEnabledIssue = issueByPath.get(
-                    `services[${i}].customCertificate.enabled`,
-                  );
-                  const customPemIssue =
-                    issueByPath.has(`services[${i}].customCertificate.certificatePem`) ||
-                    issueByPath.has(`services[${i}].customCertificate.privateKeyPem`);
-                  const routed = serviceHttpHosts(svc).length > 0;
                   return (
                     <TableRow key={i} className="align-top">
                       <TableCell className="text-center">
@@ -862,52 +830,37 @@ function ConfigEditor({
                         <Input
                           className="h-8 font-mono"
                           value={svc.name}
-                          disabled={!canEdit || httpPanel}
+                          disabled={!canEdit}
                           onChange={(e) => updateService(i, { name: e.target.value })}
                         />
                       </TableCell>
                       <TableCell>
-                        {httpPanel ? (
-                          <span className="font-mono text-sm">{svc.bindAddr}</span>
-                        ) : (
-                          <Select
-                            value={svc.type}
-                            disabled={!canEdit}
-                            onValueChange={(v) => updateServiceType(i, v as ServiceType)}
-                          >
-                            <SelectTrigger className="h-8">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {BASIC_SERVICE_TYPES.map((type) => (
-                                <SelectItem key={type} value={type}>
-                                  {type}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        )}
+                        <Select
+                          value={svc.type}
+                          disabled={!canEdit}
+                          onValueChange={(v) => updateServiceType(i, v as ServiceType)}
+                        >
+                          <SelectTrigger className="h-8">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {BASIC_SERVICE_TYPES.map((type) => (
+                              <SelectItem key={type} value={type}>
+                                {type}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </TableCell>
                       <TableCell>
-                        {httpPanel ? (
-                          <>
-                            <Input
-                              aria-invalid={!!httpHostIssue}
-                              className={cn("h-8 font-mono", httpHostIssue && "border-destructive")}
-                              placeholder="app.example.com, www.example.com"
-                              value={serviceHttpHosts(svc).join(", ")}
-                              disabled={!canEdit}
-                              onChange={(e) =>
-                                updateService(i, {
-                                  httpHost: undefined,
-                                  httpHosts: parseHttpHostsInput(e.target.value),
-                                })
-                              }
-                            />
-                            {httpHostIssue && (
-                              <p className="mt-1 text-xs text-destructive">{httpHostIssue}</p>
-                            )}
-                          </>
+                        {isHttpRouteActive(svc) ? (
+                          <p
+                            className="flex h-8 items-center gap-1.5 text-xs text-muted-foreground"
+                            title="Reachable only through the HTTP proxy; pause routing on the HTTP tab to expose a port again"
+                          >
+                            <Globe className="h-3.5 w-3.5" />
+                            via HTTP proxy — no public port
+                          </p>
                         ) : (
                           <>
                             <Input
@@ -923,71 +876,22 @@ function ConfigEditor({
                           </>
                         )}
                       </TableCell>
-                      {httpPanel && (
-                        <TableCell>
-                          {routed ? (
-                            <>
-                              <Select
-                                value={certificateSource(svc)}
-                                disabled={!canEdit}
-                                onValueChange={(v) =>
-                                  updateServiceCustomCertificate(i, {
-                                    enabled: (v as CertificateSource) === "custom",
-                                  })
-                                }
-                              >
-                                <SelectTrigger
-                                  className={cn(
-                                    "h-8",
-                                    (certificateEnabledIssue || customPemIssue) &&
-                                      "border-destructive",
-                                  )}
-                                  aria-label={`${svc.name} certificate source`}
-                                >
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="letsencrypt">Let's Encrypt</SelectItem>
-                                  <SelectItem value="custom">Custom certificate</SelectItem>
-                                </SelectContent>
-                              </Select>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                {certificateSource(svc) === "custom"
-                                  ? customPemIssue
-                                    ? "PEM missing — paste it under TLS certificates."
-                                    : "Uses the PEM pasted under TLS certificates."
-                                  : letsEncryptEnabled
-                                    ? "Covered by the automatic certificate."
-                                    : "Plain HTTP until automatic certificates are on."}
-                              </p>
-                            </>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">
-                              Assign a host first.
-                            </span>
-                          )}
-                        </TableCell>
-                      )}
-                      {!httpPanel && (
-                        <>
-                          <TableCell>
-                            <Input
-                              className="h-8 font-mono"
-                              placeholder="inherits default"
-                              value={svc.token ?? ""}
-                              disabled={!canEdit}
-                              onChange={(e) => updateService(i, { token: e.target.value })}
-                            />
-                          </TableCell>
-                          <TableCell className="text-center">
-                            <Switch
-                              checked={!!svc.nodelay}
-                              disabled={!canEdit}
-                              onCheckedChange={(v) => updateService(i, { nodelay: v })}
-                            />
-                          </TableCell>
-                        </>
-                      )}
+                      <TableCell>
+                        <Input
+                          className="h-8 font-mono"
+                          placeholder="inherits default"
+                          value={svc.token ?? ""}
+                          disabled={!canEdit}
+                          onChange={(e) => updateService(i, { token: e.target.value })}
+                        />
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <Switch
+                          checked={!!svc.nodelay}
+                          disabled={!canEdit}
+                          onCheckedChange={(v) => updateService(i, { nodelay: v })}
+                        />
+                      </TableCell>
                       <TableCell className="pt-3 text-right font-mono text-xs whitespace-nowrap">
                         <span className="text-success" title="Downloaded by visitors">
                           ↓ {formatBytes(traffic?.[svc.name]?.bytesOut)}
@@ -997,7 +901,7 @@ function ConfigEditor({
                           ↑ {formatBytes(traffic?.[svc.name]?.bytesIn)}
                         </span>
                       </TableCell>
-                      {canEdit && !httpPanel && (
+                      {canEdit && (
                         <TableCell>
                           <Button
                             variant="ghost"
@@ -1017,6 +921,245 @@ function ConfigEditor({
             </Table>
           )}
         </CardContent>
+      </Card>
+    );
+  }
+
+  /**
+   * One TCP backend's HTTP settings as a single panel: the routing switch, the
+   * hosts it answers for, which certificate serves them, and — depending on the
+   * source — either the live per-host Let's Encrypt coverage or the PEM editor.
+   */
+  function backendPanel({ service: svc, index: i }: { service: RatholeService; index: number }) {
+    const hosts = serviceHttpHosts(svc);
+    const routing = svc.httpEnabled !== false;
+    const source = certificateSource(svc);
+    const cert = online ? certificate : undefined;
+    const httpHostIssue =
+      issueByPath.get(`services[${i}].httpHosts`) ?? issueByPath.get(`services[${i}].httpHost`);
+    const certificateEnabledIssue = issueByPath.get(`services[${i}].customCertificate.enabled`);
+    const certificatePemIssue = issueByPath.get(
+      `services[${i}].customCertificate.certificatePem`,
+    );
+    const privateKeyPemIssue = issueByPath.get(`services[${i}].customCertificate.privateKeyPem`);
+    const pem = svc.customCertificate ?? { enabled: false, certificatePem: "", privateKeyPem: "" };
+    const chainCount = countPemBlocks(pem.certificatePem, /-----BEGIN CERTIFICATE-----/g);
+    const hasKey = /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(pem.privateKeyPem);
+    const pemComplete = chainCount > 0 && hasKey;
+
+    const headline = !routing
+      ? hosts.length > 0
+        ? `Routing paused · ${hosts.length} ${hosts.length === 1 ? "host" : "hosts"} kept`
+        : "Routing paused"
+      : hosts.length === 0
+        ? "No hosts assigned yet"
+        : `${hosts.length} ${hosts.length === 1 ? "host" : "hosts"} · ${
+            source === "custom" ? "custom certificate" : "Let's Encrypt"
+          }`;
+
+    return (
+      <Card key={i} className={cn(!routing && "border-dashed")}>
+        <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
+          <div className="flex min-w-0 items-center gap-3">
+            <ServiceStatusDot state={serviceState(svc.name)} />
+            <div className="min-w-0">
+              <CardTitle className="truncate font-mono text-base">{svc.name}</CardTitle>
+              <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                {routing && hosts.length > 0 ? (
+                  <span title={`Public bind ${svc.bindAddr || "(unset)"} is kept for when routing is paused`}>
+                    HTTP only · no public port
+                  </span>
+                ) : (
+                  svc.bindAddr
+                )}
+                <span className="mx-1.5 text-muted-foreground/50">·</span>
+                <span className="text-success" title="Downloaded by visitors">
+                  ↓ {formatBytes(traffic?.[svc.name]?.bytesOut)}
+                </span>{" "}
+                <span title="Uploaded by visitors">↑ {formatBytes(traffic?.[svc.name]?.bytesIn)}</span>
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
+            <span className="hidden text-xs text-muted-foreground sm:inline">{headline}</span>
+            <Label htmlFor={`route-${i}`} className="text-xs">
+              Route HTTP
+            </Label>
+            <Switch
+              id={`route-${i}`}
+              checked={routing}
+              disabled={!canEdit}
+              onCheckedChange={(enabled) => updateService(i, { httpEnabled: enabled })}
+            />
+          </div>
+        </CardHeader>
+        {routing ? (
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
+              <div className="space-y-2">
+                <Label>HTTP hosts</Label>
+                <Input
+                  aria-invalid={!!httpHostIssue}
+                  className={cn("font-mono", httpHostIssue && "border-destructive")}
+                  placeholder="app.example.com, www.example.com"
+                  value={hosts.join(", ")}
+                  disabled={!canEdit}
+                  onChange={(e) =>
+                    updateService(i, {
+                      httpHost: undefined,
+                      httpHosts: parseHttpHostsInput(e.target.value),
+                    })
+                  }
+                />
+                {httpHostIssue ? (
+                  <p className="text-xs text-destructive">{httpHostIssue}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Requests whose Host header matches are proxied straight into this service's
+                    tunnel; while routed it has no public port. Each host must resolve to this
+                    node.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label>Certificate</Label>
+                <Select
+                  value={source}
+                  disabled={!canEdit}
+                  onValueChange={(v) =>
+                    updateServiceCustomCertificate(i, {
+                      enabled: (v as CertificateSource) === "custom",
+                    })
+                  }
+                >
+                  <SelectTrigger
+                    className={cn(certificateEnabledIssue && "border-destructive")}
+                    aria-label={`${svc.name} certificate source`}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="letsencrypt">Let's Encrypt</SelectItem>
+                    <SelectItem value="custom">Custom certificate</SelectItem>
+                  </SelectContent>
+                </Select>
+                {certificateEnabledIssue ? (
+                  <p className="text-xs text-destructive">{certificateEnabledIssue}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {source === "custom"
+                      ? "Served with the PEM pair below."
+                      : letsEncryptEnabled
+                        ? "Covered by the node's automatic certificate."
+                        : "Plain HTTP until automatic certificates are on."}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {source === "letsencrypt" && letsEncryptEnabled && hosts.length > 0 && (
+              <ul className="divide-y rounded-md border">
+                {hosts.map((host) => (
+                  <li key={host} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                    <span className="min-w-0 truncate font-mono text-xs" title={host}>
+                      {host}
+                    </span>
+                    <HostCertBadge state={hostCertState(host, cert)} />
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {source === "custom" && (
+              <div className="overflow-hidden rounded-lg border">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <FileKey className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-xs font-medium">Custom certificate</span>
+                  </div>
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center gap-1.5 text-[11px]",
+                      pemComplete ? "text-success" : "text-muted-foreground",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "h-1.5 w-1.5 rounded-full",
+                        pemComplete ? "bg-success" : "bg-muted-foreground/50",
+                      )}
+                    />
+                    {pemComplete
+                      ? `${chainCount} certificate${chainCount === 1 ? "" : "s"} in chain · key present`
+                      : "Incomplete — paste both parts"}
+                  </span>
+                </div>
+                <div className="grid gap-4 p-3 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Certificate chain (PEM)</Label>
+                    <Textarea
+                      aria-label={`${svc.name} certificate chain`}
+                      aria-invalid={!!certificatePemIssue}
+                      className={cn(
+                        "min-h-36 font-mono text-xs",
+                        certificatePemIssue && "border-destructive",
+                      )}
+                      placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                      value={pem.certificatePem}
+                      disabled={!canEdit}
+                      onChange={(e) =>
+                        updateServiceCustomCertificate(i, { certificatePem: e.target.value })
+                      }
+                    />
+                    {certificatePemIssue ? (
+                      <p className="text-xs text-destructive">{certificatePemIssue}</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Leaf certificate first, then any intermediates.
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Private key (PEM)</Label>
+                    <Textarea
+                      aria-label={`${svc.name} private key`}
+                      aria-invalid={!!privateKeyPemIssue}
+                      className={cn(
+                        "min-h-36 font-mono text-xs",
+                        privateKeyPemIssue && "border-destructive",
+                      )}
+                      placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                      value={pem.privateKeyPem}
+                      disabled={!canEdit}
+                      onChange={(e) =>
+                        updateServiceCustomCertificate(i, { privateKeyPem: e.target.value })
+                      }
+                    />
+                    {privateKeyPemIssue ? (
+                      <p className="text-xs text-destructive">{privateKeyPemIssue}</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Stored on the node with owner-only permissions; the agent verifies it
+                        matches the certificate before serving.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        ) : (
+          hosts.length > 0 && (
+            <CardContent>
+              <p className="text-xs text-muted-foreground">
+                Kept but not routed:{" "}
+                <span className="font-mono">{hosts.join(", ")}</span>. The service is exposed on
+                its public bind <span className="font-mono">{svc.bindAddr}</span> meanwhile; turn
+                routing back on to serve the hosts again.
+              </p>
+            </CardContent>
+          )
+        )}
       </Card>
     );
   }
@@ -1113,8 +1256,9 @@ function ConfigEditor({
               <CardDescription>
                 Runs the agent's embedded Pingora proxy on{" "}
                 <code className="font-mono">{HTTP_PROXY_BIND_ADDR}</code> and routes each request
-                by its Host header to the TCP backend that owns that host. Backends are the TCP
-                services from the Services tab; assign their hostnames below.
+                by its Host header to the TCP backend that owns that host. Each backend below is
+                one TCP service from the Services tab, with its own routing switch, hosts and
+                certificate.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1124,9 +1268,9 @@ function ConfigEditor({
                   <p className="mt-1 text-xs text-muted-foreground">
                     {routedBackends.length > 0
                       ? `${routedBackends.length} ${
-                          routedBackends.length === 1 ? "backend has" : "backends have"
-                        } hosts assigned. Turning this off keeps them configured but stops routing.`
-                      : "Hosts stay configured while the proxy is off; nothing is routed until it is on."}
+                          routedBackends.length === 1 ? "backend is" : "backends are"
+                        } routed. Turning this off keeps them configured but stops routing.`
+                      : "Backends stay configured while the proxy is off; nothing is routed until it is on."}
                   </p>
                   {issueByPath.has("http.enabled") && (
                     <p className="mt-1 text-xs text-destructive">
@@ -1143,8 +1287,6 @@ function ConfigEditor({
             </CardContent>
           </Card>
 
-          {serviceTable(tcpBackends, true)}
-
           <Card>
             <CardHeader>
               <div className="flex items-center gap-2">
@@ -1153,215 +1295,111 @@ function ConfigEditor({
               </div>
               <CardDescription>
                 HTTPS is served on <code className="font-mono">{HTTPS_PROXY_BIND_ADDR}</code> and
-                the certificate is picked per host by SNI. Each backend chooses its source in the
-                table above: one automatic Let's Encrypt certificate covering every host that
-                needs one, or a PEM pair you paste here.
+                the certificate is picked per host by SNI. A backend either shares the node's
+                automatic Let's Encrypt certificate or brings its own PEM pair — choose that on
+                the backend itself.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
-              <section className="space-y-4">
-                <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
-                  <div>
-                    <Label>Automatic certificates (Let's Encrypt)</Label>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Issues and renews one certificate for the {letsEncryptHosts.length}{" "}
-                      {letsEncryptHosts.length === 1 ? "host" : "hosts"} on “Let's Encrypt”
-                      backends. Turning this on also enables the proxy, which answers the HTTP-01
-                      challenge on port 80.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={letsEncryptEnabled}
-                    disabled={!canEdit}
-                    onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
-                  />
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                <div>
+                  <Label>Automatic certificates (Let's Encrypt)</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Issues and renews one certificate for every routed host on “Let's Encrypt”
+                    backends. Turning this on also enables the proxy, which answers the HTTP-01
+                    challenge on port 80.
+                  </p>
                 </div>
+                <Switch
+                  checked={letsEncryptEnabled}
+                  disabled={!canEdit}
+                  onCheckedChange={(enabled) => updateLetsEncrypt({ enabled })}
+                />
+              </div>
 
-                {letsEncryptEnabled && (
-                  <>
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <Label>
-                          ACME account email <span className="text-destructive">*</span>
-                        </Label>
-                        <Input
-                          aria-invalid={issueByPath.has("http.letsEncrypt.email")}
-                          className={cn(
-                            "font-mono",
-                            issueByPath.has("http.letsEncrypt.email") && "border-destructive",
-                          )}
-                          placeholder="admin@example.com"
-                          value={config.http?.letsEncrypt?.email ?? ""}
-                          disabled={!canEdit}
-                          onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
-                        />
-                        {issueByPath.has("http.letsEncrypt.email") ? (
-                          <p className="text-xs text-destructive">
-                            {issueByPath.get("http.letsEncrypt.email")}
-                          </p>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">
-                            Let's Encrypt sends expiry warnings here.
-                          </p>
+              {letsEncryptEnabled && (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label>
+                        ACME account email <span className="text-destructive">*</span>
+                      </Label>
+                      <Input
+                        aria-invalid={issueByPath.has("http.letsEncrypt.email")}
+                        className={cn(
+                          "font-mono",
+                          issueByPath.has("http.letsEncrypt.email") && "border-destructive",
                         )}
-                      </div>
-                      <div className="flex items-start justify-between gap-4 rounded-md border px-3 py-2">
-                        <div>
-                          <Label>Use the staging directory</Label>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Issues untrusted test certificates that browsers reject, but does not
-                            consume production rate limits. Switching environments uses a separate
-                            ACME account and certificate store.
-                          </p>
-                        </div>
-                        <Switch
-                          checked={!!config.http?.letsEncrypt?.staging}
-                          disabled={!canEdit}
-                          onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
-                        />
-                      </div>
+                        placeholder="admin@example.com"
+                        value={config.http?.letsEncrypt?.email ?? ""}
+                        disabled={!canEdit}
+                        onChange={(e) => updateLetsEncrypt({ email: e.target.value })}
+                      />
+                      {issueByPath.has("http.letsEncrypt.email") ? (
+                        <p className="text-xs text-destructive">
+                          {issueByPath.get("http.letsEncrypt.email")}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Let's Encrypt sends expiry warnings here.
+                        </p>
+                      )}
                     </div>
-
-                    <p className="text-xs text-muted-foreground">
-                      HTTP-01 validation requires every host below to resolve to this node and
-                      port 80 to be reachable from the internet.
-                    </p>
-
-                    <CertificatePanel
-                      hosts={letsEncryptHosts}
-                      certificate={certificate}
-                      online={online}
-                      staging={!!config.http?.letsEncrypt?.staging}
-                    />
-                  </>
-                )}
-              </section>
-
-              <section className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <FileKey className="h-4 w-4 text-muted-foreground" />
-                  <h3 className="text-sm font-medium">Custom certificates</h3>
-                  <span className="text-xs text-muted-foreground">
-                    {customBackends.length === 0
-                      ? "none"
-                      : `${customBackends.length} ${
-                          customBackends.length === 1 ? "backend" : "backends"
-                        }`}
-                  </span>
-                </div>
-                {customBackends.length === 0 ? (
-                  <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
-                    No backend uses its own certificate. Switch a backend's certificate to
-                    “Custom certificate” in the table above to paste a PEM pair for its hosts.
-                  </div>
-                ) : (
-                  customBackends.map(({ service: svc, index: i }) => {
-                    const pem = svc.customCertificate ?? {
-                      enabled: true,
-                      certificatePem: "",
-                      privateKeyPem: "",
-                    };
-                    const certificatePemIssue = issueByPath.get(
-                      `services[${i}].customCertificate.certificatePem`,
-                    );
-                    const privateKeyPemIssue = issueByPath.get(
-                      `services[${i}].customCertificate.privateKeyPem`,
-                    );
-                    const chainCount = countPemBlocks(
-                      pem.certificatePem,
-                      /-----BEGIN CERTIFICATE-----/g,
-                    );
-                    const hasKey =
-                      /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(pem.privateKeyPem);
-                    const complete = chainCount > 0 && hasKey;
-                    return (
-                      <div key={i} className="overflow-hidden rounded-lg border">
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-3 py-2">
-                          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                            <span className="font-mono text-sm font-medium">{svc.name}</span>
-                            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-                              {serviceHttpHosts(svc).join(", ")}
-                            </span>
-                          </div>
-                          <span
-                            className={cn(
-                              "flex shrink-0 items-center gap-1.5 text-[11px]",
-                              complete ? "text-success" : "text-muted-foreground",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "h-1.5 w-1.5 rounded-full",
-                                complete ? "bg-success" : "bg-muted-foreground/50",
-                              )}
-                            />
-                            {complete
-                              ? `${chainCount} certificate${chainCount === 1 ? "" : "s"} in chain · key present`
-                              : "Incomplete — paste both parts"}
-                          </span>
-                        </div>
-                        <div className="grid gap-4 p-3 lg:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label>Certificate chain (PEM)</Label>
-                            <Textarea
-                              aria-label={`${svc.name} certificate chain`}
-                              aria-invalid={!!certificatePemIssue}
-                              className={cn(
-                                "min-h-36 font-mono text-xs",
-                                certificatePemIssue && "border-destructive",
-                              )}
-                              placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
-                              value={pem.certificatePem}
-                              disabled={!canEdit}
-                              onChange={(e) =>
-                                updateServiceCustomCertificate(i, {
-                                  certificatePem: e.target.value,
-                                })
-                              }
-                            />
-                            {certificatePemIssue ? (
-                              <p className="text-xs text-destructive">{certificatePemIssue}</p>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">
-                                Leaf certificate first, then any intermediates.
-                              </p>
-                            )}
-                          </div>
-                          <div className="space-y-2">
-                            <Label>Private key (PEM)</Label>
-                            <Textarea
-                              aria-label={`${svc.name} private key`}
-                              aria-invalid={!!privateKeyPemIssue}
-                              className={cn(
-                                "min-h-36 font-mono text-xs",
-                                privateKeyPemIssue && "border-destructive",
-                              )}
-                              placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
-                              value={pem.privateKeyPem}
-                              disabled={!canEdit}
-                              onChange={(e) =>
-                                updateServiceCustomCertificate(i, {
-                                  privateKeyPem: e.target.value,
-                                })
-                              }
-                            />
-                            {privateKeyPemIssue ? (
-                              <p className="text-xs text-destructive">{privateKeyPemIssue}</p>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">
-                                Stored on the node with owner-only permissions; the agent verifies
-                                it matches the certificate before serving.
-                              </p>
-                            )}
-                          </div>
-                        </div>
+                    <div className="flex items-start justify-between gap-4 rounded-md border px-3 py-2">
+                      <div>
+                        <Label>Use the staging directory</Label>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Issues untrusted test certificates that browsers reject, but does not
+                          consume production rate limits. Switching environments uses a separate
+                          ACME account and certificate store.
+                        </p>
                       </div>
-                    );
-                  })
-                )}
-              </section>
+                      <Switch
+                        checked={!!config.http?.letsEncrypt?.staging}
+                        disabled={!canEdit}
+                        onCheckedChange={(staging) => updateLetsEncrypt({ staging })}
+                      />
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    HTTP-01 validation requires every routed host to resolve to this node and
+                    port 80 to be reachable from the internet.
+                  </p>
+
+                  <CertificateSummary
+                    hosts={letsEncryptHosts}
+                    certificate={certificate}
+                    online={online}
+                    staging={!!config.http?.letsEncrypt?.staging}
+                  />
+                </>
+              )}
             </CardContent>
           </Card>
+
+          <div className="space-y-4">
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 className="text-base font-semibold">
+                Backends{" "}
+                <span className="text-sm font-normal text-muted-foreground">
+                  ({tcpBackends.length})
+                </span>
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                TCP services from the Services tab. UDP services cannot receive HTTP traffic.
+              </p>
+            </div>
+            {tcpBackends.length === 0 ? (
+              <Card>
+                <CardContent className="py-6 text-center text-sm text-muted-foreground">
+                  No TCP services yet. Add one in the Services tab, then assign its hosts here.
+                </CardContent>
+              </Card>
+            ) : (
+              tcpBackends.map(backendPanel)
+            )}
+          </div>
 
           {validationPanel}
           {saveBar}
@@ -1370,7 +1408,7 @@ function ConfigEditor({
 
       <TabsContent value="services">
         <div className="space-y-6">
-          {serviceTable(services, false)}
+          {serviceTable(services)}
           {validationPanel}
           {saveBar}
         </div>

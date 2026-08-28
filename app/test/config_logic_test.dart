@@ -342,4 +342,100 @@ void main() {
       expect(serviceHttpHosts(svc), ['App.example.com', 'other.example.com']);
     });
   });
+
+  group('httpEnabled', () {
+    group('isHttpRouteActive', () {
+      RatholeService hosted(bool? httpEnabled) => RatholeService(
+            name: 'web',
+            type: 'tcp',
+            bindAddr: '0.0.0.0:8080',
+            httpHosts: ['app.example.com'],
+            httpEnabled: httpEnabled,
+          );
+
+      test('absent httpEnabled counts as routed', () {
+        expect(isHttpRouteActive(hosted(null)), isTrue);
+      });
+
+      test('httpEnabled true is routed', () {
+        expect(isHttpRouteActive(hosted(true)), isTrue);
+      });
+
+      test('httpEnabled false is paused', () {
+        expect(isHttpRouteActive(hosted(false)), isFalse);
+      });
+
+      test('no HTTP hosts is inactive even with httpEnabled true', () {
+        final svc = RatholeService(
+            name: 'ssh', type: 'tcp', bindAddr: '0.0.0.0:22', httpEnabled: true);
+        expect(isHttpRouteActive(svc), isFalse);
+      });
+    });
+
+    group('normalizeConfig', () {
+      test('defaults httpEnabled to true for a service with hosts', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services[0].httpHosts = ['app.example.com'];
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isTrue);
+      });
+
+      test('preserves httpEnabled false for a service with hosts', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services[0].httpHosts = ['app.example.com']
+          ..services[0].httpEnabled = false;
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isFalse);
+      });
+
+      test('drops httpEnabled for a service without hosts even when set', () {
+        final config = baseConfig()..services[0].httpEnabled = false;
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isNull);
+      });
+    });
+
+    group("validateConfig Let's Encrypt gating", () {
+      RatholeConfig leReady(bool? httpEnabled) => baseConfig()
+        ..http = HttpProxyConfig(
+          enabled: true,
+          bindAddr: httpProxyBindAddr,
+          httpsBindAddr: httpsProxyBindAddr,
+          letsEncrypt: LetsEncryptConfig(enabled: true, email: ''),
+        )
+        ..services[0].httpHosts = ['app.example.com']
+        ..services[0].httpEnabled = httpEnabled;
+
+      bool hasEmailIssue(List<ValidationIssue> issues) =>
+          issues.any((i) => i.path == 'http.letsEncrypt.email');
+
+      test('paused hosted backend does not require an ACME email', () {
+        expect(validateConfig(leReady(false)), isEmpty);
+      });
+
+      test('routed backend (absent httpEnabled) requires an ACME email', () {
+        expect(hasEmailIssue(validateConfig(leReady(null))), isTrue);
+      });
+
+      test('routed backend (httpEnabled true) requires an ACME email', () {
+        expect(hasEmailIssue(validateConfig(leReady(true))), isTrue);
+      });
+    });
+
+    test('still validates HTTP hosts on a paused backend', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+        ..services[0].httpHosts = ['bad_host']
+        ..services[0].httpEnabled = false;
+      final issues = validateConfig(config);
+      expect(
+        issues.any((i) =>
+            i.path == 'services[0].httpHosts' &&
+            i.message.contains('HTTP host 1')),
+        isTrue,
+      );
+    });
+  });
 }

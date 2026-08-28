@@ -960,6 +960,16 @@ class _ConfigEditorState extends State<ConfigEditor> {
             ],
             if (httpPanel) ...[
               const SizedBox(height: 12),
+              _switchRow(
+                label: 'Route HTTP',
+                icon: LucideIcons.globe,
+                value: svc.httpEnabled != false,
+                enabled: canEdit,
+                onChanged: (enabled) => setState(() {
+                  svc.httpEnabled = enabled;
+                }),
+              ),
+              const SizedBox(height: 12),
               Field(
                 label: 'HTTP hosts',
                 error: httpHostIssue,
@@ -1031,17 +1041,31 @@ class _ConfigEditorState extends State<ConfigEditor> {
               ],
             ] else ...[
               const SizedBox(height: 12),
-              Field(
-                label: 'Public bind (server)',
-                error: issueByPath['services[$i].bindAddr'],
-                child: ShadInput(
-                  controller: controllers.bindAddr,
-                  enabled: canEdit,
-                  autocorrect: false,
-                  style: const TextStyle(fontFamily: 'monospace'),
-                  onChanged: (v) => setState(() => svc.bindAddr = v),
+              if (isHttpRouteActive(svc))
+                // Routed backends are reachable only through the proxy; the
+                // bind is kept for when routing is paused, but not listened on.
+                Field(
+                  label: 'Public bind (server)',
+                  child: Text(
+                    'via HTTP proxy — no public port',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: ShadTheme.of(context).colorScheme.mutedForeground,
+                    ),
+                  ),
+                )
+              else
+                Field(
+                  label: 'Public bind (server)',
+                  error: issueByPath['services[$i].bindAddr'],
+                  child: ShadInput(
+                    controller: controllers.bindAddr,
+                    enabled: canEdit,
+                    autocorrect: false,
+                    style: const TextStyle(fontFamily: 'monospace'),
+                    onChanged: (v) => setState(() => svc.bindAddr = v),
+                  ),
                 ),
-              ),
             ],
             if (!httpPanel) ...[
               const SizedBox(height: 12),

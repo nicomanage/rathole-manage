@@ -7,11 +7,12 @@ import {
   HTTP_PROXY_BIND_ADDR,
   HTTP_SERVICE_BIND_ADDR_PREFIX,
   HTTPS_PROXY_BIND_ADDR,
+  isHttpRouteActive,
   normalizeConfig,
   validateConfig,
 } from "./config-generator";
 import { hashServerConfig } from "../worker/server-config";
-import type { RatholeConfig } from "./types";
+import type { RatholeConfig, RatholeService } from "./types";
 
 function config(overrides: Partial<RatholeConfig> = {}): RatholeConfig {
   return {
@@ -148,13 +149,27 @@ describe("validateConfig", () => {
     ).toEqual([]);
   });
 
-  it("requires a public bind for HTTP-routed TCP services", () => {
+  it("does not require a public bind for HTTP-routed TCP services", () => {
+    // Routed backends are reachable only through the proxy, so there is no
+    // public port to validate.
     const issues = validateConfig(
-        config({
-          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
-          services: [{ name: "web", type: "tcp", bindAddr: "", httpHost: "app.example.com" }],
-        }),
-      );
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [{ name: "web", type: "tcp", bindAddr: "", httpHost: "app.example.com" }],
+      }),
+    );
+    expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(false);
+  });
+
+  it("requires a public bind again once routing is paused", () => {
+    const issues = validateConfig(
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "", httpHost: "app.example.com", httpEnabled: false },
+        ],
+      }),
+    );
     expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
   });
 
@@ -521,6 +536,118 @@ describe("validateConfig", () => {
       "0.0.0.0:5000",
       "0.0.0.0:5001",
     ]);
+  });
+});
+
+describe("httpEnabled", () => {
+  describe("isHttpRouteActive", () => {
+    const hosted = (httpEnabled?: boolean): RatholeService => ({
+      name: "web",
+      type: "tcp",
+      bindAddr: "0.0.0.0:8080",
+      httpHosts: ["app.example.com"],
+      httpEnabled,
+    });
+
+    it("treats an absent httpEnabled as routed", () => {
+      expect(isHttpRouteActive(hosted())).toBe(true);
+    });
+
+    it("treats httpEnabled true as routed", () => {
+      expect(isHttpRouteActive(hosted(true))).toBe(true);
+    });
+
+    it("treats httpEnabled false as paused", () => {
+      expect(isHttpRouteActive(hosted(false))).toBe(false);
+    });
+
+    it("is inactive when the service has no HTTP hosts", () => {
+      expect(
+        isHttpRouteActive({ name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22", httpEnabled: true }),
+      ).toBe(false);
+    });
+  });
+
+  describe("normalizeConfig", () => {
+    it("defaults httpEnabled to true for a service with hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHosts: ["app.example.com"] }],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBe(true);
+    });
+
+    it("preserves httpEnabled false for a service with hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [
+            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHosts: ["app.example.com"], httpEnabled: false },
+          ],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBe(false);
+    });
+
+    it("drops httpEnabled for a service without hosts even when set", () => {
+      const normalized = normalizeConfig(
+        config({
+          services: [{ name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22", httpEnabled: false }],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBeUndefined();
+    });
+  });
+
+  describe("validateConfig Let's Encrypt gating", () => {
+    const leReady = (httpEnabled?: boolean) =>
+      config({
+        http: {
+          enabled: true,
+          bindAddr: HTTP_PROXY_BIND_ADDR,
+          httpsBindAddr: HTTPS_PROXY_BIND_ADDR,
+          letsEncrypt: { enabled: true, email: "" },
+        },
+        services: [
+          { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHosts: ["app.example.com"], httpEnabled },
+        ],
+      });
+
+    it("does not require an ACME email when the only hosted backend is paused", () => {
+      expect(validateConfig(leReady(false))).toEqual([]);
+    });
+
+    it("requires an ACME email when the hosted backend is routed (absent httpEnabled)", () => {
+      const issues = validateConfig(leReady(undefined));
+      expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+    });
+
+    it("requires an ACME email when httpEnabled is explicitly true", () => {
+      const issues = validateConfig(leReady(true));
+      expect(issues.some((i) => i.path === "http.letsEncrypt.email")).toBe(true);
+    });
+  });
+
+  it("still validates HTTP hosts on a paused backend", () => {
+    const issues = validateConfig(
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [
+          {
+            name: "web",
+            type: "tcp",
+            bindAddr: "0.0.0.0:8080",
+            httpHosts: ["bad_host"],
+            httpEnabled: false,
+          },
+        ],
+      }),
+    );
+    expect(
+      issues.some((i) => i.path === "services[0].httpHosts" && /HTTP host 1/.test(i.message)),
+    ).toBe(true);
   });
 });
 

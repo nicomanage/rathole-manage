@@ -19,8 +19,17 @@ function isHttpService(svc: RatholeService): boolean {
   return svc.type === "http" || svc.type === "https";
 }
 
+/** Has HTTP hosts configured, routed or not. */
 function hasHttpRoute(svc: RatholeService): boolean {
   return serviceHttpHosts(svc).length > 0;
+}
+
+/**
+ * Has HTTP hosts that the agent will actually route — configured and not
+ * switched off. This is what certificate provisioning and validation key on.
+ */
+export function isHttpRouteActive(svc: RatholeService): boolean {
+  return hasHttpRoute(svc) && svc.httpEnabled !== false;
 }
 
 function defaultPublicBindAddr(i: number): string {
@@ -83,6 +92,8 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
       bindAddr: legacyHttpService ? restorePublicBindAddr(service, i) : service.bindAddr,
       httpHost: undefined,
       httpHosts: httpHosts.length > 0 ? httpHosts : undefined,
+      // Only meaningful with hosts; defaults to on so older configs keep routing.
+      httpEnabled: httpHosts.length > 0 ? service.httpEnabled !== false : undefined,
       customCertificate: customCertificate
         ? {
             enabled: !!customCertificate.enabled,
@@ -240,7 +251,8 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
 
   const httpEnabled = !!config.http?.enabled;
   const letsEncryptEnabled = !!config.http?.letsEncrypt?.enabled;
-  const httpRoutes = config.services.filter(hasHttpRoute);
+  // Paused routes need neither a certificate nor an ACME account.
+  const httpRoutes = config.services.filter(isHttpRouteActive);
   const letsEncryptActive = letsEncryptEnabled &&
     httpRoutes.some((service) => !service.customCertificate?.enabled);
   const customCertificateActive = httpRoutes.some(
@@ -297,7 +309,11 @@ export function validateConfig(config: RatholeConfig): ValidationIssue[] {
     }
     seen.add(svc.name);
 
-    const publicBindError = validateHostPort(svc.bindAddr, "[::]:5000");
+    // An HTTP-routed backend is reachable only through the proxy (the agent
+    // gives it an in-memory bind), so it has no public bind to validate.
+    const publicBindError = isHttpRouteActive(svc)
+      ? null
+      : validateHostPort(svc.bindAddr, "[::]:5000");
     if (publicBindError) {
       issues.push({
         path: `${base}.bindAddr`,

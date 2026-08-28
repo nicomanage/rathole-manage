@@ -19,8 +19,14 @@ bool isHttpServiceType(String type) => type == 'http' || type == 'https';
 
 bool isHttpService(RatholeService svc) => isHttpServiceType(svc.type);
 
+/// Has HTTP hosts configured, routed or not.
 bool hasHttpRoute(RatholeService svc) =>
     serviceHttpHosts(svc).isNotEmpty;
+
+/// Has HTTP hosts the agent will actually route — configured and not switched
+/// off. Certificate provisioning and validation key on this.
+bool isHttpRouteActive(RatholeService svc) =>
+    hasHttpRoute(svc) && svc.httpEnabled != false;
 
 String defaultPublicBindAddr(int i) => '0.0.0.0:${5000 + i}';
 
@@ -76,6 +82,8 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
           : service.bindAddr
       ..httpHost = null
       ..httpHosts = httpHosts.isNotEmpty ? httpHosts : null
+      // Only meaningful with hosts; defaults to on so older configs keep routing.
+      ..httpEnabled = httpHosts.isNotEmpty ? service.httpEnabled != false : null
       ..customCertificate = customCertificate == null
           ? null
           : CustomCertificateConfig(
@@ -238,7 +246,8 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
 
   final httpEnabled = config.http?.enabled ?? false;
   final letsEncryptEnabled = config.http?.letsEncrypt?.enabled ?? false;
-  final httpRoutes = config.services.where(hasHttpRoute).toList();
+  // Paused routes need neither a certificate nor an ACME account.
+  final httpRoutes = config.services.where(isHttpRouteActive).toList();
   final letsEncryptActive = letsEncryptEnabled &&
       httpRoutes.any((service) => service.customCertificate?.enabled != true);
   final customCertificateActive =
@@ -293,7 +302,11 @@ List<ValidationIssue> validateConfig(RatholeConfig config) {
     }
     seen.add(svc.name);
 
-    final publicBindError = _validateHostPort(svc.bindAddr, '[::]:5000');
+    // An HTTP-routed backend is reachable only through the proxy (the agent
+    // gives it an in-memory bind), so it has no public bind to validate.
+    final publicBindError = isHttpRouteActive(svc)
+        ? null
+        : _validateHostPort(svc.bindAddr, '[::]:5000');
     if (publicBindError != null) {
       issues.add(ValidationIssue('$base.bindAddr',
           'Service "$label" public bind address $publicBindError'));

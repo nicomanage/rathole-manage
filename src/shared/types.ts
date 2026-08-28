@@ -18,6 +18,12 @@ export interface RatholeService {
    * to the service's TCP public bind address.
    */
   httpHosts?: string[];
+  /**
+   * Whether `httpHosts` are actually routed. Absent means on; `false` keeps the
+   * hosts configured but the agent neither routes them nor includes them in any
+   * certificate, so a backend can be paused without deleting its hosts.
+   */
+  httpEnabled?: boolean;
   /** Legacy single-host field, migrated to `httpHosts` during normalization. */
   httpHost?: string;
   /** Optional HTTPS certificate served for this backend's HTTP hosts. */

@@ -309,14 +309,28 @@ fn virtual_bind_addr(service_name: &str) -> String {
     format!("memory://{service_name}")
 }
 
+/// Where rathole binds this service on the server.
+///
+/// A backend that is routed over HTTP is reachable only through the proxy: it
+/// gets an in-memory virtual bind instead of a public port, so the panel's
+/// `bindAddr` is kept (routing can be paused again) but never listened on.
 fn service_bind_addr(service: &RatholeService) -> String {
     match service.service_type {
         WireServiceType::Http | WireServiceType::Https => virtual_bind_addr(&service.name),
+        WireServiceType::Tcp if !service_http_hosts(service).is_empty() => {
+            virtual_bind_addr(&service.name)
+        }
         WireServiceType::Tcp | WireServiceType::Udp => service.bind_addr.clone(),
     }
 }
 
+/// Hosts the proxy should route for this service: the configured set, or
+/// nothing while routing is switched off (the panel keeps the hosts so the
+/// backend can be paused without losing them).
 fn service_http_hosts(service: &RatholeService) -> Vec<String> {
+    if service.http_enabled == Some(false) {
+        return Vec::new();
+    }
     let mut hosts = Vec::new();
     if let Some(list) = &service.http_hosts {
         hosts.extend(list.iter().map(String::as_str));
@@ -531,6 +545,7 @@ mod tests {
             bind_addr: "0.0.0.0:8080".into(),
             http_host: Some(host.into()),
             http_hosts: None,
+            http_enabled: None,
             custom_certificate: None,
             token: None,
             nodelay: None,
@@ -548,6 +563,7 @@ mod tests {
             bind_addr: "0.0.0.0:8080".into(),
             http_host: None,
             http_hosts: Some(hosts.iter().map(|host| host.to_string()).collect()),
+            http_enabled: None,
             custom_certificate: None,
             token: None,
             nodelay: None,
@@ -555,7 +571,34 @@ mod tests {
     }
 
     #[test]
-    fn http_routes_use_the_tcp_service_bind() {
+    fn a_paused_backend_routes_nothing_and_needs_no_certificate() {
+        let mut config = config(
+            vec![
+                service("paused", WireServiceType::Tcp, "paused.example.com"),
+                service("live", WireServiceType::Tcp, "live.example.com"),
+            ],
+            "admin@example.com",
+        );
+        config.services[0].http_enabled = Some(false);
+
+        let proxy = http_proxy_config(&config).unwrap().unwrap();
+        assert_eq!(
+            proxy
+                .routes
+                .iter()
+                .map(|r| r.host.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live.example.com"]
+        );
+        assert_eq!(proxy.https_hosts, vec!["live.example.com"]);
+
+        // Pausing the only routed backend turns the proxy off entirely.
+        config.services[1].http_enabled = Some(false);
+        assert!(http_proxy_config(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn http_routes_use_a_virtual_bind() {
         let proxy = http_proxy_config(&config(
             vec![service("web", WireServiceType::Tcp, "app.example.com")],
             "admin@example.com",
@@ -566,7 +609,7 @@ mod tests {
         assert!(proxy.lets_encrypt.is_some());
         assert_eq!(proxy.https_hosts, vec!["app.example.com".to_string()]);
         assert_eq!(proxy.routes.len(), 1);
-        assert_eq!(proxy.routes[0].upstream_addr, "0.0.0.0:8080");
+        assert_eq!(proxy.routes[0].upstream_addr, "memory://web");
     }
 
     #[test]
@@ -667,7 +710,7 @@ mod tests {
                 .iter()
                 .map(|route| route.upstream_addr.as_str())
                 .collect::<Vec<_>>(),
-            vec!["0.0.0.0:8080", "0.0.0.0:8080"]
+            vec!["memory://web", "memory://secure"]
         );
     }
 
@@ -691,8 +734,8 @@ mod tests {
                 .map(|route| (route.host.as_str(), route.upstream_addr.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("secure.example.com", "0.0.0.0:8080"),
-                ("www.example.com", "0.0.0.0:8080"),
+                ("secure.example.com", "memory://secure"),
+                ("www.example.com", "memory://secure"),
             ]
         );
         assert_eq!(
@@ -720,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn server_config_preserves_tcp_binds_for_http_routes() {
+    fn server_config_uses_virtual_binds_for_http_routes() {
         let mut tcp = service("ssh", WireServiceType::Tcp, "");
         tcp.bind_addr = "0.0.0.0:5202".into();
         tcp.http_host = None;
@@ -742,11 +785,11 @@ mod tests {
         );
         assert_eq!(
             server.services.get("web").unwrap().bind_addr.as_str(),
-            "0.0.0.0:8080"
+            "memory://web"
         );
         assert_eq!(
             server.services.get("secure").unwrap().bind_addr.as_str(),
-            "0.0.0.0:8080"
+            "memory://secure"
         );
     }
 }
