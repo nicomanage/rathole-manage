@@ -114,7 +114,9 @@ void main() {
         ..http = HttpProxyConfig(
           enabled: true,
           bindAddr: httpProxyBindAddr,
-          letsEncrypt: LetsEncryptConfig(enabled: true),
+          // The 'acme' backend below will actually be issued for, so the ACME
+          // account email is required here.
+          letsEncrypt: LetsEncryptConfig(enabled: true, email: 'admin@example.com'),
         )
         ..services[0].httpHosts = ['custom.example.com']
         ..services[0].customCertificate = CustomCertificateConfig(
