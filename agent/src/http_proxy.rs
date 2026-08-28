@@ -552,11 +552,63 @@ mod imp {
         Ok(())
     }
 
+    /// How long to keep retrying a bind that fails with "address in use".
+    ///
+    /// A proxy that was just stopped releases its listeners a moment after its
+    /// server loop returns, so the very next bind can race it; anything much
+    /// longer than this means somebody else owns the port.
+    const BIND_RETRY_WINDOW: Duration = Duration::from_secs(5);
+    const BIND_RETRY_STEP: Duration = Duration::from_millis(200);
+
+    /// Probe that `bind_addr` can be listened on, retrying briefly while the
+    /// previous listener lets go of it.
     fn validate_bind_available(bind_addr: &str, label: &str) -> AnyResult<()> {
-        let listener = TcpListener::bind(bind_addr)
-            .with_context(|| format!("binding Pingora {label} proxy on {bind_addr}"))?;
-        drop(listener);
-        Ok(())
+        let deadline = std::time::Instant::now() + BIND_RETRY_WINDOW;
+        loop {
+            match TcpListener::bind(bind_addr) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(());
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && std::time::Instant::now() < deadline =>
+                {
+                    thread::sleep(BIND_RETRY_STEP);
+                }
+                Err(error) => {
+                    let hint = if error.kind() == std::io::ErrorKind::AddrInUse {
+                        " (another program is listening there, or the previous proxy has not released it)"
+                    } else {
+                        ""
+                    };
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "binding Pingora {label} proxy on {bind_addr}{hint}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Block until `bind_addr` can be bound again, or the retry window passes.
+    /// Used after a stop so the caller can start a replacement immediately.
+    fn wait_until_bindable(bind_addr: &str) {
+        let deadline = std::time::Instant::now() + BIND_RETRY_WINDOW;
+        while std::time::Instant::now() < deadline {
+            match TcpListener::bind(bind_addr) {
+                Ok(listener) => {
+                    drop(listener);
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    thread::sleep(BIND_RETRY_STEP);
+                }
+                // Anything else (permissions, bad address) is for the next
+                // start to report properly.
+                Err(_) => return,
+            }
+        }
+        tracing::warn!(%bind_addr, "stopped proxy has not released its port yet");
     }
 
     /// Upper bound on a stop: the 1s grace period plus the 2s runtime shutdown
@@ -577,6 +629,12 @@ mod imp {
         };
         if let Some(thread) = running.thread.take() {
             let _ = thread.join();
+        }
+        // The server loop returning does not mean the kernel has closed the
+        // listeners yet; make sure a replacement can bind before we hand back.
+        wait_until_bindable(&running.config.bind_addr);
+        if let Some(https_bind_addr) = &running.config.https_bind_addr {
+            wait_until_bindable(https_bind_addr);
         }
         result
     }

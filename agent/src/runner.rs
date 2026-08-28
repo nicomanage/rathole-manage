@@ -238,8 +238,19 @@ impl Runner {
         Ok(())
     }
 
-    /// Ask rathole to shut down, waiting up to a few seconds for a clean stop.
+    /// Stop everything: the embedded rathole server and the HTTP proxy. This is
+    /// the explicit Stop command (and "desired state: stopped"); a config push
+    /// goes through `restart` instead, which leaves the proxy to `apply`.
     pub async fn stop(&mut self) {
+        self.stop_rathole().await;
+        if let Err(e) = self.http_proxy.stop().await {
+            tracing::warn!("Pingora HTTP proxy stop failed: {e:#}");
+            self.last_error = Some(format!("{e:#}"));
+        }
+    }
+
+    /// Ask rathole to shut down, waiting up to a few seconds for a clean stop.
+    async fn stop_rathole(&mut self) {
         if let Some(running) = self.inner.take() {
             let _ = running.shutdown.send(true);
             match tokio::time::timeout(Duration::from_secs(5), running.handle).await {
@@ -252,14 +263,14 @@ impl Runner {
                 }
             }
         }
-        if let Err(e) = self.http_proxy.stop().await {
-            tracing::warn!("Pingora HTTP proxy stop failed: {e:#}");
-            self.last_error = Some(format!("{e:#}"));
-        }
     }
 
+    /// Cycle rathole and re-apply the proxy config. The proxy is *not* torn
+    /// down first: `HttpProxyRunner::apply` compares the new runtime config
+    /// with the running one and only restarts Pingora when something it serves
+    /// actually changed, so a routine config push keeps :80/:443 up.
     pub async fn restart(&mut self) -> Result<()> {
-        self.stop().await;
+        self.stop_rathole().await;
         if let Err(e) = self.start().await {
             // `start` has already recorded it in last_error. Log it so it reaches
             // the panel's live log stream, and return it so config acks and
