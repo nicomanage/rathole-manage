@@ -503,12 +503,12 @@ mod imp {
             }
 
             self.stop().await?;
-            self.start(config)?;
+            self.start(config).await?;
             Ok(())
         }
 
-        fn start(&mut self, config: RuntimeConfig) -> AnyResult<()> {
-            validate_runtime_bind_available(&config)?;
+        async fn start(&mut self, config: RuntimeConfig) -> AnyResult<()> {
+            validate_runtime_bind_available(&config).await?;
 
             let shutdown = Arc::new(Notify::new());
             let thread_shutdown = shutdown.clone();
@@ -541,13 +541,13 @@ mod imp {
         }
     }
 
-    fn validate_runtime_bind_available(config: &RuntimeConfig) -> AnyResult<()> {
-        validate_bind_available(&config.bind_addr, "HTTP")?;
+    async fn validate_runtime_bind_available(config: &RuntimeConfig) -> AnyResult<()> {
+        validate_bind_available(&config.bind_addr, "HTTP").await?;
         if let Some(https_bind_addr) = &config.https_bind_addr {
             if https_bind_addr == &config.bind_addr {
                 bail!("Pingora HTTPS bind address must be different from HTTP bind address");
             }
-            validate_bind_available(https_bind_addr, "HTTPS")?;
+            validate_bind_available(https_bind_addr, "HTTPS").await?;
         }
         Ok(())
     }
@@ -561,8 +561,9 @@ mod imp {
     const BIND_RETRY_STEP: Duration = Duration::from_millis(200);
 
     /// Probe that `bind_addr` can be listened on, retrying briefly while the
-    /// previous listener lets go of it.
-    fn validate_bind_available(bind_addr: &str, label: &str) -> AnyResult<()> {
+    /// previous listener lets go of it. Async so the wait yields the tokio
+    /// worker instead of stalling status reports and the hub socket.
+    async fn validate_bind_available(bind_addr: &str, label: &str) -> AnyResult<()> {
         let deadline = std::time::Instant::now() + BIND_RETRY_WINDOW;
         loop {
             match TcpListener::bind(bind_addr) {
@@ -574,7 +575,7 @@ mod imp {
                     if error.kind() == std::io::ErrorKind::AddrInUse
                         && std::time::Instant::now() < deadline =>
                 {
-                    thread::sleep(BIND_RETRY_STEP);
+                    tokio::time::sleep(BIND_RETRY_STEP).await;
                 }
                 Err(error) => {
                     let hint = if error.kind() == std::io::ErrorKind::AddrInUse {
