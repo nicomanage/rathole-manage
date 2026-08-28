@@ -475,6 +475,8 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
 }
 
 fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
+    // Read before the field-by-field moves below borrow-check against us.
+    let proxy_on = proxy_enabled(&config);
     let mut transport = TransportConfig::default();
     transport.transport_type = match config.transport {
         WireTransportType::Tcp => TransportType::Tcp,
@@ -499,7 +501,6 @@ fn to_server_config(config: RatholeConfig) -> Result<ServerConfig> {
         tls: websocket.tls.unwrap_or(false),
     });
 
-    let proxy_on = proxy_enabled(&config);
     let services = config
         .services
         .into_iter()
