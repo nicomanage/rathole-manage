@@ -438,4 +438,127 @@ void main() {
       );
     });
   });
+
+  group('httpEnabled — proxy and hosts interplay', () {
+    RatholeService routedService(bool? httpEnabled) => RatholeService(
+          name: 'web',
+          type: 'tcp',
+          bindAddr: '',
+          httpHosts: ['app.example.com'],
+          httpEnabled: httpEnabled,
+        );
+
+    group('public bind and the proxy switch', () {
+      test('empty public bind is OK while proxy is on (httpEnabled absent)', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services = [routedService(null)];
+        final issues = validateConfig(config);
+        expect(issues.any((i) => i.path == 'services[0].bindAddr'), isFalse);
+      });
+
+      test('empty public bind is OK while proxy is on (httpEnabled true)', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services = [routedService(true)];
+        final issues = validateConfig(config);
+        expect(issues.any((i) => i.path == 'services[0].bindAddr'), isFalse);
+      });
+
+      test('empty public bind is flagged once the proxy is off (httpEnabled absent)',
+          () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: false, bindAddr: httpProxyBindAddr)
+          ..services = [routedService(null)];
+        final issues = validateConfig(config);
+        expect(issues.any((i) => i.path == 'services[0].bindAddr'), isTrue);
+      });
+
+      test('empty public bind is flagged once the proxy is off (httpEnabled true)',
+          () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: false, bindAddr: httpProxyBindAddr)
+          ..services = [routedService(true)];
+        final issues = validateConfig(config);
+        expect(issues.any((i) => i.path == 'services[0].bindAddr'), isTrue);
+      });
+    });
+
+    group('routing on without hosts', () {
+      test('flags services[i].httpHosts and mentions no hosts', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services = [
+            RatholeService(
+                name: 'web',
+                type: 'tcp',
+                bindAddr: '0.0.0.0:8080',
+                httpEnabled: true),
+          ];
+        final issues = validateConfig(config);
+        final hostIssues =
+            issues.where((i) => i.path == 'services[0].httpHosts').toList();
+        expect(hostIssues, isNotEmpty);
+        expect(hostIssues.first.message.toLowerCase(), contains('no hosts'));
+      });
+    });
+
+    group('normalizeConfig httpEnabled retention', () {
+      test('keeps an explicit httpEnabled true on a service that has no hosts',
+          () {
+        final config = baseConfig()
+          ..services = [
+            RatholeService(
+                name: 'ssh',
+                type: 'tcp',
+                bindAddr: '0.0.0.0:22',
+                httpEnabled: true),
+          ];
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isTrue);
+      });
+
+      test('drops httpEnabled false on a service that has no hosts', () {
+        final config = baseConfig()
+          ..services = [
+            RatholeService(
+                name: 'ssh',
+                type: 'tcp',
+                bindAddr: '0.0.0.0:22',
+                httpEnabled: false),
+          ];
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isNull);
+      });
+
+      test('defaults httpEnabled to true for a service that has hosts', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services = [
+            RatholeService(
+                name: 'web',
+                type: 'tcp',
+                bindAddr: '0.0.0.0:8080',
+                httpHosts: ['app.example.com']),
+          ];
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isTrue);
+      });
+
+      test('preserves httpEnabled false for a service that has hosts', () {
+        final config = baseConfig()
+          ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+          ..services = [
+            RatholeService(
+                name: 'web',
+                type: 'tcp',
+                bindAddr: '0.0.0.0:8080',
+                httpHosts: ['app.example.com'],
+                httpEnabled: false),
+          ];
+        final normalized = normalizeConfig(config);
+        expect(normalized.services[0].httpEnabled, isFalse);
+      });
+    });
+  });
 }

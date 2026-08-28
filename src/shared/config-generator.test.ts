@@ -651,6 +651,116 @@ describe("httpEnabled", () => {
   });
 });
 
+describe("httpEnabled — proxy and hosts interplay", () => {
+  const routedService = (httpEnabled?: boolean): RatholeService => ({
+    name: "web",
+    type: "tcp",
+    bindAddr: "",
+    httpHosts: ["app.example.com"],
+    httpEnabled,
+  });
+
+  describe("public bind and the proxy switch", () => {
+    it("does not flag an empty public bind while the proxy is on (httpEnabled absent)", () => {
+      const issues = validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [routedService(undefined)],
+        }),
+      );
+      expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(false);
+    });
+
+    it("does not flag an empty public bind while the proxy is on (httpEnabled true)", () => {
+      const issues = validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [routedService(true)],
+        }),
+      );
+      expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(false);
+    });
+
+    it("flags the empty public bind once the proxy is off (httpEnabled absent)", () => {
+      const issues = validateConfig(
+        config({
+          http: { enabled: false, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [routedService(undefined)],
+        }),
+      );
+      expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
+    });
+
+    it("flags the empty public bind once the proxy is off (httpEnabled true)", () => {
+      const issues = validateConfig(
+        config({
+          http: { enabled: false, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [routedService(true)],
+        }),
+      );
+      expect(issues.some((i) => i.path === "services[0].bindAddr")).toBe(true);
+    });
+  });
+
+  describe("routing on without hosts", () => {
+    it("flags services[i].httpHosts and mentions no hosts", () => {
+      const issues = validateConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [
+            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpEnabled: true },
+          ],
+        }),
+      );
+      const hostIssue = issues.find((i) => i.path === "services[0].httpHosts");
+      expect(hostIssue).toBeDefined();
+      expect(hostIssue!.message).toMatch(/no hosts/i);
+    });
+  });
+
+  describe("normalizeConfig httpEnabled retention", () => {
+    it("keeps an explicit httpEnabled true on a service that has no hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          services: [{ name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22", httpEnabled: true }],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBe(true);
+    });
+
+    it("drops httpEnabled false on a service that has no hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          services: [{ name: "ssh", type: "tcp", bindAddr: "0.0.0.0:22", httpEnabled: false }],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBeUndefined();
+    });
+
+    it("defaults httpEnabled to true for a service that has hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [{ name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHosts: ["app.example.com"] }],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBe(true);
+    });
+
+    it("preserves httpEnabled false for a service that has hosts", () => {
+      const normalized = normalizeConfig(
+        config({
+          http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+          services: [
+            { name: "web", type: "tcp", bindAddr: "0.0.0.0:8080", httpHosts: ["app.example.com"], httpEnabled: false },
+          ],
+        }),
+      );
+      expect(normalized.services[0].httpEnabled).toBe(false);
+    });
+  });
+});
+
 describe("generateClientToml", () => {
   it("uses the instance domain and control port for remote_addr", () => {
     const toml = generateClientToml(config({ domain: "tunnel.example.com" }));
