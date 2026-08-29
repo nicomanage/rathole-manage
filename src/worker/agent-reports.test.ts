@@ -38,6 +38,86 @@ describe("parseAgentReport", () => {
   });
 });
 
+describe("parseAgentReport tolerance", () => {
+  it("accepts a status report whose metrics is null and normalizes it to undefined", () => {
+    const result = parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        metrics: null,
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(result?.status.metrics).toBeUndefined();
+  });
+
+  it("rejects a status report whose metrics is neither undefined, null, nor a plain object", () => {
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        metrics: "cpu",
+      },
+    })).toBeNull();
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        metrics: [],
+      },
+    })).toBeNull();
+  });
+
+  it("accepts a well-formed certificate, rejects an unknown state and an array certificate", () => {
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        certificate: { domains: ["app.example.com"], staging: false, state: "valid", checkedAt: 1 },
+      },
+    })).not.toBeNull();
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        certificate: { domains: ["app.example.com"], staging: false, state: "expiring", checkedAt: 1 },
+      },
+    })).toBeNull();
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        certificate: [],
+      },
+    })).toBeNull();
+  });
+
+  it("accepts a string error but rejects a numeric error", () => {
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        error: "boom",
+      },
+    })).not.toBeNull();
+    expect(parseAgentReport({
+      reportedAt: 100,
+      status: {
+        type: "status",
+        processState: "running",
+        error: 42,
+      },
+    })).toBeNull();
+  });
+});
+
 describe("mergeAgentState", () => {
   it("uses a fresh D1 report while the control socket is connected", () => {
     const view = mergeAgentState(instance, {
