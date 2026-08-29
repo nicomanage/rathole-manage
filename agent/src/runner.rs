@@ -392,12 +392,15 @@ fn http_proxy_config(config: &RatholeConfig) -> Result<Option<AgentHttpProxyConf
             // Only reached with the proxy on (checked above), so routed backends
             // resolve to their virtual bind here.
             let upstream_addr = service_bind_addr(svc, true);
+            let upstream_tls = svc.http_upstream_tls.unwrap_or(false)
+                || matches!(svc.service_type, WireServiceType::Https);
             let service = svc.name.clone();
             service_http_hosts(svc)
                 .into_iter()
                 .map(move |host| HttpRoute {
                     host,
                     upstream_addr: upstream_addr.clone(),
+                    upstream_tls,
                     service: service.clone(),
                 })
                 .collect::<Vec<_>>()
@@ -578,6 +581,7 @@ mod tests {
             http_host: Some(host.into()),
             http_hosts: None,
             http_enabled: None,
+            http_upstream_tls: None,
             custom_certificate: None,
             token: None,
             nodelay: None,
@@ -596,6 +600,7 @@ mod tests {
             http_host: None,
             http_hosts: Some(hosts.iter().map(|host| host.to_string()).collect()),
             http_enabled: None,
+            http_upstream_tls: None,
             custom_certificate: None,
             token: None,
             nodelay: None,
@@ -662,6 +667,27 @@ mod tests {
         assert_eq!(proxy.https_hosts, vec!["app.example.com".to_string()]);
         assert_eq!(proxy.routes.len(), 1);
         assert_eq!(proxy.routes[0].upstream_addr, "memory://web");
+        assert!(!proxy.routes[0].upstream_tls);
+    }
+
+    #[test]
+    fn https_backends_use_tls_without_changing_the_rathole_service_type() {
+        let mut web = service("web", WireServiceType::Tcp, "app.example.com");
+        web.http_upstream_tls = Some(true);
+        let proxy = http_proxy_config(&config(vec![web], "admin@example.com"))
+            .unwrap()
+            .unwrap();
+
+        assert!(proxy.routes[0].upstream_tls);
+        let server = to_server_config(config(
+            vec![service("web", WireServiceType::Https, "app.example.com")],
+            "admin@example.com",
+        ))
+        .unwrap();
+        assert_eq!(
+            server.services.get("web").unwrap().service_type,
+            ServiceType::Tcp
+        );
     }
 
     #[test]

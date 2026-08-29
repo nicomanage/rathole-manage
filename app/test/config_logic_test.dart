@@ -109,6 +109,14 @@ void main() {
       expect(validateConfig(config), isEmpty);
     });
 
+    test('accepts an HTTPS backend with an invalid certificate', () {
+      final config = baseConfig()
+        ..http = HttpProxyConfig(enabled: true, bindAddr: httpProxyBindAddr)
+        ..services[0].httpHosts = ['app.example.com']
+        ..services[0].httpUpstreamTls = true;
+      expect(validateConfig(config), isEmpty);
+    });
+
     test('allows ACME and per-backend certificates together', () {
       final config = baseConfig()
         ..http = HttpProxyConfig(
@@ -240,6 +248,7 @@ void main() {
       expect(web.type, 'tcp');
       expect(web.httpHosts, ['app.example.com']);
       expect(web.bindAddr, '0.0.0.0:5001');
+      expect(web.httpUpstreamTls, isTrue);
     });
 
     test('migrates a legacy global certificate to HTTP backends', () {

@@ -658,6 +658,7 @@ function ConfigEditor({
               httpHost: undefined,
               httpHosts: undefined,
               httpEnabled: undefined,
+              httpUpstreamTls: undefined,
               customCertificate: undefined,
             }
           : {}),
@@ -978,6 +979,8 @@ function ConfigEditor({
       : hosts.length === 0
         ? "No hosts assigned yet"
         : `${hosts.length} ${hosts.length === 1 ? "host" : "hosts"} · ${
+            svc.httpUpstreamTls ? "HTTPS backend" : "HTTP backend"
+          } · ${
             source === "custom" ? "custom certificate" : "Let's Encrypt"
           }`;
 
@@ -991,7 +994,7 @@ function ConfigEditor({
               <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
                 {routing && httpEnabled ? (
                   <span title={`Public bind ${svc.bindAddr || "(unset)"} is kept for when routing is paused`}>
-                    HTTP only · no public port
+                    {svc.httpUpstreamTls ? "HTTPS" : "HTTP"} backend · no public port
                   </span>
                 ) : routing ? (
                   <span title="Routing is on, but the proxy is off, so the service is exposed on its public bind until the proxy is enabled">
@@ -1023,7 +1026,7 @@ function ConfigEditor({
         </CardHeader>
         {routing ? (
           <CardContent className="space-y-4">
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_12rem_16rem]">
               <div className="space-y-2">
                 <Label>HTTP hosts</Label>
                 <Input
@@ -1050,7 +1053,32 @@ function ConfigEditor({
                 )}
               </div>
               <div className="space-y-2">
-                <Label>Certificate</Label>
+                <Label>Backend protocol</Label>
+                <Select
+                  value={svc.httpUpstreamTls ? "https" : "http"}
+                  disabled={!canEdit}
+                  onValueChange={(value) =>
+                    updateService(i, {
+                      httpUpstreamTls: value === "https" ? true : undefined,
+                    })
+                  }
+                >
+                  <SelectTrigger aria-label={`${svc.name} backend protocol`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="http">HTTP</SelectItem>
+                    <SelectItem value="https">HTTPS</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {svc.httpUpstreamTls
+                    ? "TLS through the tunnel; invalid and self-signed backend certificates are accepted."
+                    : "Plain HTTP through the tunnel."}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Public certificate</Label>
                 <Select
                   value={source}
                   disabled={!canEdit}
@@ -1284,8 +1312,9 @@ function ConfigEditor({
               <CardDescription>
                 Runs the agent's embedded Pingora proxy on{" "}
                 <code className="font-mono">{HTTP_PROXY_BIND_ADDR}</code> and routes each request
-                by its Host header to the TCP backend that owns that host. Each backend below is
-                one TCP service from the Services tab, with its own routing switch, hosts and
+                by its Host header to the TCP backend that owns that host. Each backend can use
+                HTTP or HTTPS; HTTPS backends accept invalid and self-signed certificates inside
+                the tunnel. Each backend below has its own routing switch, hosts and public
                 certificate.
               </CardDescription>
             </CardHeader>

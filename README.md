@@ -185,10 +185,14 @@ Each instance has a control channel (`bind_addr`, an optional operator-facing
 domain, an auto-generated `default_token`, transport: `tcp` / `tls` / `noise` /
 `websocket`), optional HTTP proxy settings (`http.enabled`,
 `http.letsEncrypt`), and a list of services. A service maps a public `bind_addr`
-on the server and can optionally set `httpHosts` and `customCertificate`. When an HTTP host is set on a TCP
-service and the HTTP proxy is enabled, Pingora listens on fixed IPv6 wildcard
-addresses `[::]:80` and, with Let's Encrypt enabled, `[::]:443`; it matches the
-request Host and reverse-proxies to that service's rathole public bind address.
+on the server and can optionally set `httpHosts`, `httpUpstreamTls`, and
+`customCertificate`. When an HTTP host is set on a TCP service and the HTTP
+proxy is enabled, Pingora listens on fixed IPv6 wildcard addresses `[::]:80`
+and, with Let's Encrypt enabled, `[::]:443`; it matches the request Host and
+reverse-proxies through that service's in-memory rathole tunnel. Backends use
+plain HTTP by default. With `httpUpstreamTls: true`, Pingora performs TLS over
+the tunnel and accepts self-signed, expired, or hostname-mismatched backend
+certificates; the authenticated rathole tunnel provides the backend identity.
 If `http.letsEncrypt.enabled` is true, the agent uses HTTP-01 validation, so port
 80 must be reachable for every configured HTTP host; certificates are renewed
 when they have fewer than 30 days remaining. A backend can instead enable its

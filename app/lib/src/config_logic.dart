@@ -83,6 +83,7 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
     final service = config.services[i].clone();
     final httpHosts = serviceHttpHosts(service);
     final legacyHttpService = isHttpService(service);
+    final legacyHttpsService = service.type == 'https';
     final customCertificate = service.customCertificate ??
         (httpHosts.isNotEmpty ? legacyCustomCertificate : null);
     service
@@ -101,6 +102,10 @@ RatholeConfig normalizeConfig(RatholeConfig input) {
           : httpHosts.isNotEmpty
               ? service.httpEnabled != false
               : null
+      ..httpUpstreamTls = service.type != 'udp' &&
+              (service.httpUpstreamTls == true || legacyHttpsService)
+          ? true
+          : null
       ..customCertificate = customCertificate == null
           ? null
           : CustomCertificateConfig(

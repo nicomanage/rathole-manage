@@ -24,6 +24,12 @@ export interface RatholeService {
    * certificate, so a backend can be paused without deleting its hosts.
    */
   httpEnabled?: boolean;
+  /**
+   * Use HTTPS from Pingora to the client-side service. The agent accepts an
+   * invalid/self-signed backend certificate because this hop is already inside
+   * the authenticated rathole tunnel.
+   */
+  httpUpstreamTls?: boolean;
   /** Legacy single-host field, migrated to `httpHosts` during normalization. */
   httpHost?: string;
   /** Optional HTTPS certificate served for this backend's HTTP hosts. */

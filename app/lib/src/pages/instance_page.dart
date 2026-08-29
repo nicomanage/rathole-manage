@@ -536,6 +536,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
           ..httpHost = null
           ..httpHosts = null
           ..httpEnabled = null
+          ..httpUpstreamTls = null
           ..customCertificate = null;
         _serviceControllers[i].httpHosts.text = '';
         _serviceControllers[i].certificatePem.text = '';
@@ -1027,8 +1028,43 @@ class _ConfigEditorState extends State<ConfigEditor> {
                 ),
               ),
               const SizedBox(height: 12),
+              Field(
+                label: 'Backend protocol',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ShadSelect<String>(
+                      key: ValueKey(
+                          'backend-protocol-$i-${svc.httpUpstreamTls == true ? 'https' : 'http'}'),
+                      initialValue:
+                          svc.httpUpstreamTls == true ? 'https' : 'http',
+                      enabled: canEdit,
+                      options: const [
+                        ShadOption(value: 'http', child: Text('HTTP')),
+                        ShadOption(value: 'https', child: Text('HTTPS')),
+                      ],
+                      selectedOptionBuilder: (context, value) =>
+                          Text(value.toUpperCase()),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() => svc.httpUpstreamTls =
+                              value == 'https' ? true : null);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      svc.httpUpstreamTls == true
+                          ? 'TLS through the tunnel; invalid and self-signed backend certificates are accepted.'
+                          : 'Plain HTTP through the tunnel.',
+                      style: theme.textTheme.muted.copyWith(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
               _switchRow(
-                label: 'Custom certificate',
+                label: 'Custom public certificate',
                 icon: LucideIcons.keyRound,
                 value: svc.customCertificate?.enabled ?? false,
                 enabled: canEdit,

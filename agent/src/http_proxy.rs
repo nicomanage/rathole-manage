@@ -4,6 +4,7 @@ use crate::acme::LetsEncryptConfig;
 pub struct HttpRoute {
     pub host: String,
     pub upstream_addr: String,
+    pub upstream_tls: bool,
     pub service: String,
 }
 
@@ -35,6 +36,7 @@ mod imp {
     use anyhow::{bail, Context, Result as AnyResult};
     use async_trait::async_trait;
     use bytes::Bytes;
+    use pingora::connectors::L4Connect;
     use pingora::http::ResponseHeader;
     use pingora::listeners::tls::TlsSettings;
     use pingora::listeners::{TcpSocketOptions, TlsAccept};
@@ -42,18 +44,16 @@ mod imp {
         ConnectError, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult, Server,
         Session,
     };
+    use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
     use pingora::protocols::l4::stream::Stream as PingoraStream;
     use pingora::protocols::l4::virt::{VirtualSockOpt, VirtualSocket, VirtualSocketStream};
-    use pingora::protocols::tls::{CustomALPN, ALPN};
-    use pingora::protocols::Stream as PingoraIoStream;
-    use pingora::proxy::{http_proxy_service_with_name_custom, ProcessCustomSession};
+    use pingora::proxy::http_proxy_service_with_name;
     use pingora::server::configuration::ServerConf;
     use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
     use pingora::tls::ext;
     use pingora::tls::pkey::{PKey, Private};
     use pingora::tls::ssl::{NameType, SslRef};
     use pingora::tls::x509::X509;
-    use pingora::upstreams::peer::Peer;
     use std::collections::HashMap;
     use std::fs;
     use std::future::Future;
@@ -71,6 +71,7 @@ mod imp {
     #[derive(Clone)]
     struct RouteState {
         upstream_addr: String,
+        upstream_tls: bool,
         service: String,
     }
 
@@ -140,48 +141,43 @@ mod imp {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct RatholeConnector;
+    #[derive(Debug)]
+    struct RatholeConnector {
+        upstream_addr: String,
+    }
+
+    fn upstream_peer_for_route(route: &RouteState, host: Option<&str>) -> HttpPeer {
+        let port = if route.upstream_tls { 443 } else { 80 };
+        let mut peer = HttpPeer::new(
+            ("127.0.0.1", port),
+            route.upstream_tls,
+            host.unwrap_or_default().to_string(),
+        );
+        peer.options.custom_l4 = Some(Arc::new(RatholeConnector {
+            upstream_addr: route.upstream_addr.clone(),
+        }));
+        if route.upstream_tls {
+            // These backends live behind the authenticated rathole tunnel and
+            // commonly use self-signed, expired, or hostname-mismatched
+            // certificates. Encrypt the hop but deliberately do not use the
+            // certificate as an identity check.
+            peer.options.verify_cert = false;
+            peer.options.verify_hostname = false;
+        }
+        peer
+    }
 
     #[async_trait]
-    impl pingora::connectors::http::custom::Connector for RatholeConnector {
-        type Session = ();
-
-        async fn get_http_session<P: Peer + Send + Sync + 'static>(
-            &self,
-            peer: &P,
-        ) -> PingoraResult<(
-            pingora::connectors::http::custom::Connection<Self::Session>,
-            bool,
-        )> {
-            let key = peer.sni();
-            let duplex = rathole::open_virtual_tcp(key).await.map_err(|error| {
-                Error::because(ConnectError, "opening rathole virtual upstream", error)
-            })?;
-            let stream = PingoraStream::from(VirtualSocketStream::new(Box::new(
+    impl L4Connect for RatholeConnector {
+        async fn connect(&self, _addr: &PingoraSocketAddr) -> PingoraResult<PingoraStream> {
+            let duplex = rathole::open_virtual_tcp(&self.upstream_addr)
+                .await
+                .map_err(|error| {
+                    Error::because(ConnectError, "opening rathole virtual upstream", error)
+                })?;
+            Ok(PingoraStream::from(VirtualSocketStream::new(Box::new(
                 RatholeVirtualSocket(duplex),
-            )));
-            Ok((
-                pingora::connectors::http::custom::Connection::Stream(
-                    Box::new(stream) as PingoraIoStream
-                ),
-                false,
-            ))
-        }
-
-        async fn reused_http_session<P: Peer + Send + Sync + 'static>(
-            &self,
-            _peer: &P,
-        ) -> Option<Self::Session> {
-            None
-        }
-
-        async fn release_http_session<P: Peer + Send + Sync + 'static>(
-            &self,
-            _session: Self::Session,
-            _peer: &P,
-            _idle_timeout: Option<Duration>,
-        ) {
+            ))))
         }
     }
 
@@ -240,9 +236,15 @@ mod imp {
                 .route
                 .as_ref()
                 .expect("Pingora HTTP route should be set by request_filter");
-            let mut peer = HttpPeer::new(("127.0.0.1", 0), false, route.upstream_addr.clone());
-            peer.options.alpn = ALPN::Custom(CustomALPN::new(b"rathole-memory".to_vec()));
-            Ok(Box::new(peer))
+            // The socket itself comes from rathole, while Pingora's normal
+            // transport connector still owns the optional TLS handshake. This
+            // is important for HTTPS backends: returning a raw stream from a
+            // custom HTTP connector would make Pingora speak plaintext to the
+            // backend and never reach certificate verification at all.
+            Ok(Box::new(upstream_peer_for_route(
+                route,
+                ctx.host.as_deref(),
+            )))
         }
 
         async fn upstream_request_filter(
@@ -257,8 +259,8 @@ mod imp {
                 }
                 let _ = upstream_request.insert_header("X-Forwarded-Host", host.as_str());
             }
-            // TLS terminates here and the backend only ever sees plain HTTP, so
-            // tell it what the visitor used. Without this a backend that
+            // Tell the backend what the visitor used, independently of whether
+            // the backend hop itself is HTTP or HTTPS. Without this a backend that
             // redirects http→https (nginx `return 301 https://…`) loops forever.
             let downstream = session.as_downstream();
             let proto = if downstream.digest().is_some_and(|d| d.ssl_digest.is_some()) {
@@ -288,6 +290,7 @@ mod imp {
                 tracing::debug!(
                     service = %route.service,
                     upstream = %route.upstream_addr,
+                    upstream_tls = route.upstream_tls,
                     host = ?ctx.host,
                     error = ?error.map(|e| e.to_string()),
                     "Pingora proxied HTTP request"
@@ -523,6 +526,7 @@ mod imp {
                     normalize_route_host(&route.host),
                     RouteState {
                         upstream_addr: route.upstream_addr.clone(),
+                        upstream_tls: route.upstream_tls,
                         service: route.service.clone(),
                     },
                 );
@@ -780,15 +784,8 @@ mod imp {
         let mut server = Server::new_with_opt_and_conf(None, conf);
         server.bootstrap();
         let router = HostRouter { shared };
-        let on_custom: ProcessCustomSession<HostRouter, RatholeConnector> =
-            Arc::new(|_, stream, _| Box::pin(async move { Some(stream) }));
-        let mut service = http_proxy_service_with_name_custom(
-            &server.configuration,
-            router,
-            "rathole-agent-pingora",
-            RatholeConnector,
-            on_custom,
-        );
+        let mut service =
+            http_proxy_service_with_name(&server.configuration, router, "rathole-agent-pingora");
         for (addr, options) in listen_addrs(&config.bind_addr) {
             match options {
                 Some(options) => service.add_tcp_with_settings(&addr, options),
@@ -990,6 +987,40 @@ mod imp {
             trimmed.split_once(':').map(|(h, _)| h).unwrap_or(trimmed)
         };
         normalize_route_host(host_without_port)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use pingora::upstreams::peer::Peer;
+
+        #[test]
+        fn https_backend_uses_tls_and_accepts_an_invalid_certificate() {
+            let route = RouteState {
+                upstream_addr: "memory://web".into(),
+                upstream_tls: true,
+                service: "web".into(),
+            };
+            let peer = upstream_peer_for_route(&route, Some("app.example.com"));
+
+            assert!(peer.tls());
+            assert_eq!(peer.sni(), "app.example.com");
+            assert!(!peer.verify_cert());
+            assert!(!peer.verify_hostname());
+            assert!(peer.options.custom_l4.is_some());
+        }
+
+        #[test]
+        fn http_backend_stays_plaintext() {
+            let route = RouteState {
+                upstream_addr: "memory://web".into(),
+                upstream_tls: false,
+                service: "web".into(),
+            };
+            let peer = upstream_peer_for_route(&route, Some("app.example.com"));
+
+            assert!(!peer.tls());
+        }
     }
 }
 

@@ -38,6 +38,10 @@ pub struct RatholeService {
     pub http_hosts: Option<Vec<String>>,
     /// `Some(false)` keeps the hosts configured but routes nothing for them.
     pub http_enabled: Option<bool>,
+    /// Use TLS between Pingora and the client-side HTTP service. Certificates
+    /// are not verified because the connection is carried by the authenticated
+    /// rathole tunnel and private backends commonly use self-signed certs.
+    pub http_upstream_tls: Option<bool>,
     pub custom_certificate: Option<CustomCertificateConfig>,
     pub token: Option<String>,
     pub nodelay: Option<bool>,

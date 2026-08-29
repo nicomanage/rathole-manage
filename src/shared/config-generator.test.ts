@@ -108,6 +108,21 @@ describe("validateConfig", () => {
     )).toEqual([]);
   });
 
+  it("accepts an HTTPS backend with certificate verification disabled by the agent", () => {
+    expect(validateConfig(
+      config({
+        http: { enabled: true, bindAddr: HTTP_PROXY_BIND_ADDR },
+        services: [{
+          name: "web",
+          type: "tcp",
+          bindAddr: "0.0.0.0:8080",
+          httpHost: "app.example.com",
+          httpUpstreamTls: true,
+        }],
+      }),
+    )).toEqual([]);
+  });
+
   it("rejects HTTP hosts on UDP services", () => {
     const issues = validateConfig(
       config({
@@ -411,6 +426,20 @@ describe("validateConfig", () => {
       privateKeyPem: "key",
     });
     expect(normalized.services[1].customCertificate).toBeUndefined();
+  });
+
+  it("migrates a legacy https service to a TLS backend hop", () => {
+    const normalized = normalizeConfig(config({
+      services: [{
+        name: "web",
+        type: "https",
+        bindAddr: "memory://web",
+        httpHost: "app.example.com",
+      }],
+    }));
+
+    expect(normalized.services[0].type).toBe("tcp");
+    expect(normalized.services[0].httpUpstreamTls).toBe(true);
   });
 
   it("normalizes proxy binds to fixed IPv6 wildcard ports", () => {

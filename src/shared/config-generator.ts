@@ -115,6 +115,13 @@ export function normalizeConfig(config: RatholeConfig): RatholeConfig {
           : httpHosts.length > 0
             ? service.httpEnabled !== false
             : undefined,
+      // Preserve the old `https` service marker as the backend-hop protocol.
+      // Plain TCP/legacy HTTP routes stay on HTTP and omit the default value.
+      httpUpstreamTls:
+        service.type !== "udp" &&
+          (service.httpUpstreamTls === true || service.type === "https")
+          ? true
+          : undefined,
       customCertificate: customCertificate
         ? {
             enabled: !!customCertificate.enabled,

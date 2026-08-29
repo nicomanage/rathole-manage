@@ -1,6 +1,6 @@
 [package]
 name = "rathole-agent"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Rust agent that embeds rathole and connects a node to the rathole-manage control plane over WebSocket."

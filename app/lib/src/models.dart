@@ -56,6 +56,9 @@ class RatholeService {
   List<String>? httpHosts;
   /// `false` keeps the hosts configured but routes nothing for them.
   bool? httpEnabled;
+  /// Use TLS from Pingora to the client-side service. Backend certificate
+  /// verification is disabled inside the authenticated rathole tunnel.
+  bool? httpUpstreamTls;
   String? httpHost;
   CustomCertificateConfig? customCertificate;
   String? token;
@@ -67,6 +70,7 @@ class RatholeService {
     required this.bindAddr,
     this.httpHosts,
     this.httpEnabled,
+    this.httpUpstreamTls,
     this.httpHost,
     this.customCertificate,
     this.token,
@@ -79,6 +83,7 @@ class RatholeService {
         bindAddr: json['bindAddr'] as String? ?? '',
         httpHosts: (json['httpHosts'] as List?)?.cast<String>(),
         httpEnabled: json['httpEnabled'] as bool?,
+        httpUpstreamTls: json['httpUpstreamTls'] as bool?,
         httpHost: json['httpHost'] as String?,
         customCertificate: json['customCertificate'] == null
             ? null
@@ -94,6 +99,7 @@ class RatholeService {
         'bindAddr': bindAddr,
         if (httpHosts != null) 'httpHosts': httpHosts,
         if (httpEnabled != null) 'httpEnabled': httpEnabled,
+        if (httpUpstreamTls != null) 'httpUpstreamTls': httpUpstreamTls,
         if (httpHost != null) 'httpHost': httpHost,
         if (customCertificate != null)
           'customCertificate': customCertificate!.toJson(),
