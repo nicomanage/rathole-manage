@@ -425,9 +425,22 @@ mod imp {
                 // describing the previous config's domains or staging flag.
                 self.cert_status = None;
                 self.ensure_http_listener(&config.bind_addr).await?;
-                let domains = route_domains(&config.https_hosts);
+                let configured = route_domains(&config.https_hosts);
+                // A name that does not resolve cannot pass HTTP-01: Let's Encrypt
+                // would fail the whole order, and repeated attempts count against
+                // the failed-validation rate limit. Drop those names here and
+                // order for the rest, so one typo does not cost every host its
+                // certificate.
+                let (domains, unresolved) = split_resolvable(&configured).await;
+                if !unresolved.is_empty() {
+                    tracing::warn!(
+                        hosts = ?unresolved,
+                        "skipping Let's Encrypt for hosts that do not resolve"
+                    );
+                }
                 if domains.is_empty() {
-                    self.cert_status = None;
+                    self.cert_status = (!configured.is_empty())
+                        .then(|| unresolved_status(lets_encrypt, &unresolved));
                 } else {
                     // Scoped so the immutable borrow of `self` ends before the
                     // `&mut self` write below.
@@ -439,7 +452,17 @@ mod imp {
                             .await
                     };
                     let outcome = outcome.context("ensuring Let's Encrypt certificate")?;
-                    self.cert_status = Some(certificate_status(&outcome, lets_encrypt, &domains));
+                    let mut status = certificate_status(&outcome, lets_encrypt, &domains);
+                    if !unresolved.is_empty() {
+                        // Surfaced next to whatever the issuance itself said: the
+                        // certificate can be perfectly valid and still not cover
+                        // the host the operator is actually testing.
+                        status.error = Some(truncate_cert_error(&join_errors(
+                            status.error.as_deref(),
+                            &unresolved_message(&unresolved),
+                        )));
+                    }
+                    self.cert_status = Some(status);
                     renewed = outcome.renewed;
 
                     if let Some(error) = outcome.error.as_deref() {
@@ -926,6 +949,71 @@ mod imp {
             header.headers.get("host").and_then(|v| v.to_str().ok()),
             header.uri.host(),
         )
+    }
+
+    /// Split hosts into those that resolve and those that do not.
+    ///
+    /// Resolution only — deliberately not "does it resolve to *this* node".
+    /// A host fronted by a CDN resolves to the CDN's addresses and still passes
+    /// HTTP-01 (the CDN forwards port 80), so comparing against our own
+    /// addresses would reject working setups. A name that resolves nowhere,
+    /// though, can never pass.
+    async fn split_resolvable(domains: &[String]) -> (Vec<String>, Vec<String>) {
+        let mut resolvable = Vec::new();
+        let mut unresolved = Vec::new();
+        for domain in domains {
+            // Port 80 because that is where HTTP-01 will be answered; the port
+            // itself plays no part in resolution.
+            match tokio::net::lookup_host((domain.as_str(), 80)).await {
+                // Mutating in a match guard is not allowed, so step the iterator
+                // in the arm body instead.
+                Ok(mut addrs) => {
+                    if addrs.next().is_some() {
+                        resolvable.push(domain.clone());
+                    } else {
+                        unresolved.push(domain.clone());
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%domain, ?error, "DNS lookup failed before HTTP-01");
+                    unresolved.push(domain.clone());
+                }
+            }
+        }
+        (resolvable, unresolved)
+    }
+
+    fn unresolved_message(unresolved: &[String]) -> String {
+        format!(
+            "{} do{} not resolve, so HTTP-01 cannot succeed for {}; point {} at this node in DNS",
+            unresolved.join(", "),
+            if unresolved.len() == 1 { "es" } else { "" },
+            if unresolved.len() == 1 { "it" } else { "them" },
+            if unresolved.len() == 1 { "it" } else { "them" },
+        )
+    }
+
+    /// Status for "every configured host is unresolvable": nothing was ordered,
+    /// so there is no certificate to describe, only the reason.
+    fn unresolved_status(
+        lets_encrypt: &LetsEncryptConfig,
+        unresolved: &[String],
+    ) -> CertificateStatus {
+        CertificateStatus {
+            domains: Vec::new(),
+            staging: lets_encrypt.staging,
+            state: CertificateState::Failed,
+            not_after: None,
+            error: Some(truncate_cert_error(&unresolved_message(unresolved))),
+            checked_at: crate::now_ms(),
+        }
+    }
+
+    fn join_errors(existing: Option<&str>, extra: &str) -> String {
+        match existing {
+            Some(existing) if !existing.is_empty() => format!("{existing}; {extra}"),
+            _ => extra.to_string(),
+        }
     }
 
     /// Which name the request is for, from the two places it can live.
