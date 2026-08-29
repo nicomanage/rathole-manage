@@ -37,7 +37,7 @@ mod imp {
     use bytes::Bytes;
     use pingora::http::ResponseHeader;
     use pingora::listeners::tls::TlsSettings;
-    use pingora::listeners::TlsAccept;
+    use pingora::listeners::{TcpSocketOptions, TlsAccept};
     use pingora::prelude::{
         ConnectError, Error, HttpPeer, ProxyHttp, RequestHeader, Result as PingoraResult, Server,
         Session,
@@ -575,14 +575,48 @@ mod imp {
     }
 
     async fn validate_runtime_bind_available(config: &RuntimeConfig) -> AnyResult<()> {
-        validate_bind_available(&config.bind_addr, "HTTP").await?;
+        for (addr, _) in listen_addrs(&config.bind_addr) {
+            validate_bind_available(&addr, "HTTP").await?;
+        }
         if let Some(https_bind_addr) = &config.https_bind_addr {
             if https_bind_addr == &config.bind_addr {
                 bail!("Pingora HTTPS bind address must be different from HTTP bind address");
             }
-            validate_bind_available(https_bind_addr, "HTTPS").await?;
+            for (addr, _) in listen_addrs(https_bind_addr) {
+                validate_bind_available(&addr, "HTTPS").await?;
+            }
         }
         Ok(())
+    }
+
+    /// The concrete sockets to open for a configured wildcard address.
+    ///
+    /// `[::]:port` is bound as two explicit listeners — `0.0.0.0:port` and an
+    /// IPv6-only `[::]:port` — instead of relying on the kernel's dual-stack
+    /// default: with `net.ipv6.bindv6only=1` a lone `[::]` would never see
+    /// IPv4 clients, and with IPv6 disabled it would not bind at all. When the
+    /// host has no IPv6 the v6 listener is simply skipped. Non-wildcard
+    /// addresses are used as given.
+    fn listen_addrs(bind_addr: &str) -> Vec<(String, Option<TcpSocketOptions>)> {
+        let Some(port) = bind_addr.strip_prefix("[::]:") else {
+            return vec![(bind_addr.to_string(), None)];
+        };
+        let mut addrs = vec![(format!("0.0.0.0:{port}"), None)];
+        if ipv6_available() {
+            let mut options = TcpSocketOptions::default();
+            options.ipv6_only = Some(true);
+            addrs.push((bind_addr.to_string(), Some(options)));
+        } else {
+            tracing::warn!(
+                "IPv6 is not available on this host; the HTTP proxy listens on IPv4 only"
+            );
+        }
+        addrs
+    }
+
+    /// Whether an IPv6 wildcard socket can be created and bound at all.
+    fn ipv6_available() -> bool {
+        TcpListener::bind("[::]:0").is_ok()
     }
 
     /// How long to keep retrying a bind that fails with "address in use".
@@ -671,9 +705,13 @@ mod imp {
         }
         // The server loop returning does not mean the kernel has closed the
         // listeners yet; make sure a replacement can bind before we hand back.
-        wait_until_bindable(&running.config.bind_addr);
+        for (addr, _) in listen_addrs(&running.config.bind_addr) {
+            wait_until_bindable(&addr);
+        }
         if let Some(https_bind_addr) = &running.config.https_bind_addr {
-            wait_until_bindable(https_bind_addr);
+            for (addr, _) in listen_addrs(https_bind_addr) {
+                wait_until_bindable(&addr);
+            }
         }
         result
     }
@@ -705,13 +743,22 @@ mod imp {
             RatholeConnector,
             on_custom,
         );
-        service.add_tcp(&config.bind_addr);
+        for (addr, options) in listen_addrs(&config.bind_addr) {
+            match options {
+                Some(options) => service.add_tcp_with_settings(&addr, options),
+                None => service.add_tcp(&addr),
+            }
+        }
         if let Some(https_bind_addr) = config.https_bind_addr.as_ref() {
-            let dynamic_certificates = DynamicCertificates::load(&config.certificates)?;
-            let mut tls_settings = TlsSettings::with_callbacks(Box::new(dynamic_certificates))
-                .map_err(|e| format!("creating TLS settings: {e:#}"))?;
-            tls_settings.enable_h2();
-            service.add_tls_with_settings(https_bind_addr, None, tls_settings);
+            // One certificate store shared by every HTTPS listener (v4 and v6).
+            let certificates = Arc::new(DynamicCertificates::load(&config.certificates)?);
+            for (addr, options) in listen_addrs(https_bind_addr) {
+                let mut tls_settings =
+                    TlsSettings::with_callbacks(Box::new(SharedCertificates(certificates.clone())))
+                        .map_err(|e| format!("creating TLS settings: {e:#}"))?;
+                tls_settings.enable_h2();
+                service.add_tls_with_settings(&addr, options, tls_settings);
+            }
         }
         server.add_service(service);
         server.run(RunArgs {
@@ -767,6 +814,18 @@ mod imp {
                 return Err("HTTPS listener requires at least one certificate".into());
             }
             Ok(Self { certificates })
+        }
+    }
+
+    /// `TlsSettings` takes ownership of its callback, and the proxy has one
+    /// HTTPS listener per address family, so hand each one a handle to the
+    /// same loaded store instead of parsing the certificates twice.
+    struct SharedCertificates(Arc<DynamicCertificates>);
+
+    #[async_trait]
+    impl TlsAccept for SharedCertificates {
+        async fn certificate_callback(&self, ssl: &mut SslRef) {
+            self.0.certificate_callback(ssl).await
         }
     }
 
