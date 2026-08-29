@@ -130,7 +130,7 @@ The CI publishes signed-off `.deb` packages (amd64 + arm64) to the APT repo on
 GitHub Pages:
 
 ```bash
-echo "deb [trusted=yes] https://rathole.qwe7002.com/apt ./" \
+echo "deb [trusted=yes] https://rathole-manage.reall.icu/apt ./" \
   | sudo tee /etc/apt/sources.list.d/rathole-agent.list
 sudo apt-get update
 sudo apt-get install rathole-agent
@@ -140,7 +140,7 @@ sudo rathole-agent login
 sudo systemctl enable --now rathole-agent
 ```
 
-The install page is `https://rathole.qwe7002.com/`. Publishing is
+The install page is `https://rathole-manage.reall.icu/`. Publishing is
 done by `.github/workflows/apt-pages.yml`; enable it once under **Settings →
 Pages → Build and deployment → GitHub Actions**, then run the `apt-pages`
 workflow once. The APT URL starts working after that workflow publishes
