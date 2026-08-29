@@ -26,7 +26,12 @@ bool hasHttpRoute(RatholeService svc) =>
 /// Whether the operator has HTTP routing switched on. An unset flag means "on"
 /// only when hosts already exist (configs from before the switch), so a
 /// freshly added service starts off.
-bool isHttpRoutingOn(RatholeService svc) => svc.httpEnabled ?? hasHttpRoute(svc);
+bool isHttpRoutingOn(RatholeService svc) {
+  // Only TCP can be proxied, so a stale flag on a UDP service never counts as
+  // routing (it would otherwise block saving with no switch to turn it off).
+  if (svc.type == 'udp') return false;
+  return svc.httpEnabled ?? hasHttpRoute(svc);
+}
 
 /// Has HTTP hosts the agent will actually route — routing on and at least one
 /// host. Certificate provisioning keys on this.

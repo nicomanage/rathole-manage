@@ -512,6 +512,7 @@ class _ConfigEditorState extends State<ConfigEditor> {
         svc
           ..httpHost = null
           ..httpHosts = null
+          ..httpEnabled = null
           ..customCertificate = null;
         _serviceControllers[i].httpHosts.text = '';
         _serviceControllers[i].certificatePem.text = '';

@@ -30,6 +30,9 @@ function hasHttpRoute(svc: RatholeService): boolean {
  * switch), so a freshly added service starts off.
  */
 export function isHttpRoutingOn(svc: RatholeService): boolean {
+  // Only TCP can be proxied, so a stale flag on a UDP service never counts as
+  // routing (it would otherwise block saving with no switch to turn it off).
+  if (svc.type === "udp") return false;
   return svc.httpEnabled ?? hasHttpRoute(svc);
 }
 

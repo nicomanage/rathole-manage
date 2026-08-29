@@ -636,7 +636,12 @@ function ConfigEditor({
         ...previous,
         type,
         ...(type === "udp"
-          ? { httpHost: undefined, httpHosts: undefined, customCertificate: undefined }
+          ? {
+              httpHost: undefined,
+              httpHosts: undefined,
+              httpEnabled: undefined,
+              customCertificate: undefined,
+            }
           : {}),
       };
       return normalizeConfig({ ...c, services });
