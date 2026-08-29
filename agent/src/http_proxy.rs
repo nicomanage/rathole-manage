@@ -1126,6 +1126,100 @@ mod imp {
 
             assert!(!peer.tls());
         }
+
+        #[test]
+        fn pick_request_host_uses_header_when_present() {
+            let host = pick_request_host(Some("example.com"), None);
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_uses_uri_when_header_absent() {
+            let host = pick_request_host(None, Some("example.com"));
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_prefers_header_over_uri() {
+            let host = pick_request_host(Some("header.example.com"), Some("uri.example.com"));
+            assert_eq!(host.as_deref(), Some("header.example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_returns_none_when_neither_available() {
+            let host = pick_request_host(None, None);
+            assert!(host.is_none());
+        }
+
+        #[test]
+        fn pick_request_host_falls_back_to_uri_when_header_normalizes_to_empty() {
+            let host = pick_request_host(Some("."), Some("example.com"));
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_strips_port_from_hostname() {
+            let host = pick_request_host(Some("example.com:8443"), None);
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_lowercases_host() {
+            let host = pick_request_host(Some("EXAMPLE.COM"), None);
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_strips_trailing_dot() {
+            let host = pick_request_host(Some("example.com."), None);
+            assert_eq!(host.as_deref(), Some("example.com"));
+        }
+
+        #[test]
+        fn pick_request_host_keeps_ipv6_brackets() {
+            let host = pick_request_host(Some("[::1]"), None);
+            assert_eq!(host.as_deref(), Some("[::1]"));
+        }
+
+        #[test]
+        fn unresolved_message_names_single_host_with_singular_grammar() {
+            let message = unresolved_message(&["alpha.example.com".to_string()]);
+            assert!(message.contains("alpha.example.com"));
+            assert!(message.contains("does not resolve"));
+        }
+
+        #[test]
+        fn unresolved_message_names_every_host_with_plural_grammar() {
+            let message = unresolved_message(&[
+                "alpha.example.com".to_string(),
+                "beta.example.com".to_string(),
+            ]);
+            assert!(message.contains("alpha.example.com"));
+            assert!(message.contains("beta.example.com"));
+            assert!(message.contains("do not resolve"));
+            assert!(!message.contains("does not resolve"));
+        }
+
+        #[test]
+        fn join_errors_returns_extra_when_existing_is_none() {
+            assert_eq!(join_errors(None, "extra error"), "extra error");
+        }
+
+        #[test]
+        fn join_errors_returns_extra_when_existing_is_empty() {
+            assert_eq!(join_errors(Some(""), "extra error"), "extra error");
+        }
+
+        #[test]
+        fn join_errors_combines_existing_before_extra_with_separator() {
+            let result = join_errors(Some("first error"), "second error");
+            assert!(result.contains("first error"));
+            assert!(result.contains("second error"));
+            let first = result.find("first error").unwrap();
+            let second = result.find("second error").unwrap();
+            assert!(first < second);
+            assert!(second > first + "first error".len());
+        }
     }
 }
 
