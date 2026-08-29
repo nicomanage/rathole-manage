@@ -42,6 +42,14 @@ interface Env {
 
 const MIN_PASSWORD_LENGTH = 8;
 const ROLES: Role[] = ["admin", "viewer"];
+const AGENT_COMMANDS = new Set<AgentCommand>([
+  "start",
+  "stop",
+  "restart",
+  "reload",
+  "status",
+  "renew_certificate",
+]);
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const SESSION_COOKIE = "rathole_session";
@@ -540,6 +548,7 @@ async function handleApi(req: Request, env: Env): Promise<Response> {
       if (!isAdmin) return forbidden();
       const body = (await req.json().catch(() => ({}))) as { command?: AgentCommand };
       if (!body.command) return json({ error: "command required" }, 400);
+      if (!AGENT_COMMANDS.has(body.command)) return json({ error: "unknown command" }, 400);
       const delivered = await stub.sendCommand(id, body.command);
       return json({ delivered });
     }

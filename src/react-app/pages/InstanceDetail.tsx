@@ -600,6 +600,24 @@ function ConfigEditor({
 }) {
   const [config, setConfig] = useState<RatholeConfig>(() => normalizeConfig(structuredClone(initial)));
   const [saving, setSaving] = useState(false);
+  const [renewing, setRenewing] = useState(false);
+
+  /** Ask the agent to re-issue the Let's Encrypt certificate now. */
+  async function renewCertificate() {
+    setRenewing(true);
+    try {
+      const { delivered } = await api.sendCommand(id, "renew_certificate");
+      if (delivered) {
+        toast.success("Renewal requested — the certificate status updates once the agent reports back");
+      } else {
+        toast.error("Agent is offline");
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setRenewing(false);
+    }
+  }
   const issues = useMemo(() => validateConfig(config), [config]);
   const issueByPath = useMemo(
     () => new Map(issues.map((issue) => [issue.path, issue.message])),
@@ -1372,10 +1390,32 @@ function ConfigEditor({
                     </div>
                   </div>
 
-                  <p className="text-xs text-muted-foreground">
-                    HTTP-01 validation requires every routed host to resolve to this node and
-                    port 80 to be reachable from the internet.
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">
+                      HTTP-01 validation requires every routed host to resolve to this node and
+                      port 80 to be reachable from the internet.
+                    </p>
+                    {canEdit && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!online || renewing || dirty || letsEncryptHosts.length === 0}
+                        title={
+                          dirty
+                            ? "Save your changes first — renewal uses the configuration the agent already has"
+                            : !online
+                              ? "The node is offline"
+                              : letsEncryptHosts.length === 0
+                                ? "No backend is routed with Let's Encrypt"
+                                : "Re-issue the certificate now, even if the current one is still valid (e.g. after switching staging off)"
+                        }
+                        onClick={() => void renewCertificate()}
+                      >
+                        <RotateCw className={cn("h-4 w-4", renewing && "animate-spin")} />
+                        {renewing ? "Requesting…" : "Renew now"}
+                      </Button>
+                    )}
+                  </div>
 
                   <CertificateSummary
                     hosts={letsEncryptHosts}

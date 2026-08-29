@@ -393,6 +393,29 @@ class _ConfigEditorState extends State<ConfigEditor> {
   late RatholeConfig _config;
   late String _initialJson;
   bool _saving = false;
+  bool _renewing = false;
+
+  /// Ask the agent to re-issue the Let's Encrypt certificate now.
+  Future<void> _renewCertificate() async {
+    final state = AppScope.of(context);
+    setState(() => _renewing = true);
+    try {
+      final delivered =
+          await state.api.sendCommand(widget.instanceId, 'renew_certificate');
+      if (!mounted) return;
+      showToast(
+        context,
+        delivered
+            ? 'Renewal requested — status updates once the agent reports back'
+            : 'Agent is offline',
+        error: !delivered,
+      );
+    } catch (e) {
+      if (mounted) showToast(context, '$e', error: true);
+    } finally {
+      if (mounted) setState(() => _renewing = false);
+    }
+  }
 
   // Controllers so text fields keep their cursor across rebuilds.
   late TextEditingController _bindAddr;
@@ -756,6 +779,23 @@ class _ConfigEditorState extends State<ConfigEditor> {
                 }),
               ),
             ),
+            if (canEdit && (http?.letsEncrypt?.enabled ?? false)) ...[
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerRight,
+                child: ShadButton.outline(
+                  // Renewal uses the configuration the agent already has, so
+                  // unsaved edits would be misleading; require a clean state.
+                  enabled: !_renewing &&
+                      !_dirty &&
+                      widget.instance.status == 'online',
+                  onPressed: _renewCertificate,
+                  leading: const Icon(LucideIcons.rotateCw, size: 16),
+                  child: Text(
+                      _renewing ? 'Requesting…' : 'Renew certificate now'),
+                ),
+              ),
+            ],
           ],
         ),
       ),

@@ -247,7 +247,7 @@ mod imp {
 
         async fn upstream_request_filter(
             &self,
-            _session: &mut Session,
+            session: &mut Session,
             upstream_request: &mut RequestHeader,
             ctx: &mut Self::CTX,
         ) -> PingoraResult<()> {
@@ -255,6 +255,25 @@ mod imp {
                 if let Err(error) = upstream_request.insert_header("Host", host.as_str()) {
                     tracing::warn!(%host, ?error, "failed to set upstream Host header");
                 }
+                let _ = upstream_request.insert_header("X-Forwarded-Host", host.as_str());
+            }
+            // TLS terminates here and the backend only ever sees plain HTTP, so
+            // tell it what the visitor used. Without this a backend that
+            // redirects http→https (nginx `return 301 https://…`) loops forever.
+            let downstream = session.as_downstream();
+            let proto = if downstream.digest().is_some_and(|d| d.ssl_digest.is_some()) {
+                "https"
+            } else {
+                "http"
+            };
+            let _ = upstream_request.insert_header("X-Forwarded-Proto", proto);
+            if let Some(ip) = downstream
+                .client_addr()
+                .and_then(|addr| addr.as_inet())
+                .map(|addr| addr.ip().to_string())
+            {
+                let _ = upstream_request.insert_header("X-Forwarded-For", ip.as_str());
+                let _ = upstream_request.insert_header("X-Real-IP", ip.as_str());
             }
             Ok(())
         }
@@ -331,6 +350,9 @@ mod imp {
         shared: Arc<SharedState>,
         running: Option<Running>,
         cert_status: Option<CertificateStatus>,
+        /// Set by `renew_certificate`; consumed by the next `apply`, which then
+        /// re-issues even when the certificate on disk is still fresh.
+        force_renew: bool,
     }
 
     impl Default for HttpProxyRunner {
@@ -345,7 +367,28 @@ mod imp {
                 shared: Arc::new(SharedState::default()),
                 running: None,
                 cert_status: None,
+                force_renew: false,
             }
+        }
+
+        /// Operator-triggered "renew now": re-run `apply` with the freshness
+        /// short-circuit disabled, so the certificate is re-issued from the
+        /// currently configured directory (production or staging).
+        pub async fn renew_certificate(
+            &mut self,
+            config: Option<HttpProxyConfig>,
+        ) -> AnyResult<()> {
+            let Some(config) = config.filter(|c| c.lets_encrypt.is_some()) else {
+                bail!("Let's Encrypt is not enabled on this node");
+            };
+            if route_domains(&config.https_hosts).is_empty() {
+                bail!("no backend is routed with Let's Encrypt, nothing to renew");
+            }
+            self.force_renew = true;
+            let result = self.apply(Some(config)).await;
+            // `apply` consumes the flag; clear it here too in case it bailed early.
+            self.force_renew = false;
+            result
         }
 
         /// Last known Let's Encrypt certificate state, for the status report to
@@ -385,9 +428,12 @@ mod imp {
                 } else {
                     // Scoped so the immutable borrow of `self` ends before the
                     // `&mut self` write below.
+                    let force = std::mem::take(&mut self.force_renew);
                     let outcome = {
                         let issuer = AcmeIssuer::new(self.shared.challenges.clone());
-                        issuer.ensure_certificate(lets_encrypt, &domains).await
+                        issuer
+                            .ensure_certificate(lets_encrypt, &domains, force)
+                            .await
                     };
                     let outcome = outcome.context("ensuring Let's Encrypt certificate")?;
                     self.cert_status = Some(certificate_status(&outcome, lets_encrypt, &domains));
@@ -964,6 +1010,10 @@ mod imp {
         /// No proxy on this platform, so never a certificate.
         pub fn certificate_status(&self) -> Option<CertificateStatus> {
             None
+        }
+
+        pub async fn renew_certificate(&mut self, _config: Option<HttpProxyConfig>) -> Result<()> {
+            bail!("Pingora HTTP proxy is only available on Unix agent targets");
         }
 
         pub async fn apply(&mut self, config: Option<HttpProxyConfig>) -> Result<()> {

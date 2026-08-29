@@ -286,6 +286,15 @@ impl Runner {
         self.http_proxy.certificate_status()
     }
 
+    /// Operator-triggered "renew now" for the Let's Encrypt certificate. The
+    /// outcome lands in `certificate_status()` like any other issuance; the
+    /// returned error is what the command result carries back to the panel.
+    pub async fn renew_certificate(&mut self) -> Result<()> {
+        self.http_proxy
+            .renew_certificate(self.http_config.clone())
+            .await
+    }
+
     /// Last error worth showing next to the process state: a failed start or
     /// stop, or an HTTP proxy that failed while rathole itself kept running.
     /// Cleared once everything comes up cleanly.

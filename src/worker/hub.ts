@@ -76,6 +76,7 @@ function desiredStateForCommand(command: AgentCommand): Instance["desiredProcess
     case "reload":
       return "running";
     case "status":
+    case "renew_certificate":
       return undefined;
   }
 }

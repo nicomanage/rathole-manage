@@ -139,6 +139,10 @@ pub enum AgentCommand {
     Restart,
     Reload,
     Status,
+    /// Re-issue the Let's Encrypt certificate now, even if the current one is
+    /// still fresh (operator switched staging off, or wants a clean start).
+    #[serde(rename = "renew_certificate")]
+    RenewCertificate,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]

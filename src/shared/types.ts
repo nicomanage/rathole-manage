@@ -284,7 +284,14 @@ export type AgentToHub =
   | { type: "command_result"; command: AgentCommand; ok: boolean; error?: string }
   | { type: "pong" };
 
-export type AgentCommand = "start" | "stop" | "restart" | "reload" | "status";
+/** `renew_certificate` re-issues the Let's Encrypt certificate even if it is still fresh. */
+export type AgentCommand =
+  | "start"
+  | "stop"
+  | "restart"
+  | "reload"
+  | "status"
+  | "renew_certificate";
 
 /** A service the agent should probe for reachability. */
 export interface ServiceRef {

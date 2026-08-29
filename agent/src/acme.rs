@@ -140,6 +140,7 @@ mod imp {
             &self,
             config: &LetsEncryptConfig,
             domains: &[String],
+            force: bool,
         ) -> Result<CertificateOutcome> {
             let domains = normalize_domains(domains)?;
             let environment_dir = self.storage_dir.join(environment_name(config.staging));
@@ -151,7 +152,10 @@ mod imp {
             let domains_path = cert_dir.join("domains.txt");
 
             let facts = inspect_certificate(&paths, &domains_path, &domains)?;
-            if facts.fresh {
+            // `force` is the operator's explicit "renew now": skip the freshness
+            // short-circuit but keep everything else (so a failed forced renewal
+            // still degrades to the certificate already on disk).
+            if facts.fresh && !force {
                 return Ok(CertificateOutcome {
                     paths: Some(paths),
                     facts,
@@ -176,7 +180,7 @@ mod imp {
             tracing::info!(
                 domains = ?domains,
                 staging = config.staging,
-                reason = facts.reason.unwrap_or("renewal"),
+                reason = if force { "forced" } else { facts.reason.unwrap_or("renewal") },
                 "requesting Let's Encrypt certificate"
             );
             let issued = async {

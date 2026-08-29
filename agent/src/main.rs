@@ -479,6 +479,7 @@ async fn handle_hub_message(
                 }
                 AgentCommand::Restart | AgentCommand::Reload => guard.restart().await,
                 AgentCommand::Status => Ok(()),
+                AgentCommand::RenewCertificate => guard.renew_certificate().await,
             };
             let state = guard.state();
             let statuses = guard.service_status();
