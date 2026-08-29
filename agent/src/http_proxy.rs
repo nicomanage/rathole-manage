@@ -921,9 +921,26 @@ mod imp {
     }
 
     fn request_host(session: &Session) -> Option<String> {
-        let raw = session.get_header("host")?.to_str().ok()?;
-        let normalized = normalize_request_host(raw);
-        (!normalized.is_empty()).then_some(normalized)
+        let header = session.req_header();
+        pick_request_host(
+            header.headers.get("host").and_then(|v| v.to_str().ok()),
+            header.uri.host(),
+        )
+    }
+
+    /// Which name the request is for, from the two places it can live.
+    ///
+    /// HTTP/1.1 sends a `Host` header; **HTTP/2 does not** — the name arrives as
+    /// the `:authority` pseudo-header, which Pingora exposes as the request
+    /// URI's authority. Reading only the header made every h2 request (i.e.
+    /// every browser over HTTPS, since the listener advertises h2 via ALPN) fail
+    /// to route and get a 400, while HTTP/1.1 clients were served normally.
+    fn pick_request_host(header_host: Option<&str>, uri_host: Option<&str>) -> Option<String> {
+        [header_host, uri_host]
+            .into_iter()
+            .flatten()
+            .map(normalize_request_host)
+            .find(|host| !host.is_empty())
     }
 
     /// Fold an issuance result into the shape the hub and panel consume.

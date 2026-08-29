@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useHubSocket } from "@/hooks/useHubSocket";
 import { api } from "@/lib/api";
@@ -89,12 +89,27 @@ export function InstanceDetail() {
   const [pendingCommand, setPendingCommand] = useState<AgentCommand | null>(null);
   const instance = instanceMap.get(id);
 
+  // Agent reports land in D1 without waking the hub Durable Object, so nothing
+  // pushes them at us — the background refresh is on a 30s timer. The agent
+  // reports as soon as it has run a command or applied a config, so pull a few
+  // times around that instead of making the operator wait out the timer.
+  const refreshTimers = useRef<number[]>([]);
+  useEffect(() => () => refreshTimers.current.forEach(window.clearTimeout), []);
+  const refreshAfterAgentAction = useCallback(() => {
+    const pull = () => void refresh().catch(() => undefined);
+    pull();
+    for (const delay of [1_500, 5_000]) {
+      refreshTimers.current.push(window.setTimeout(pull, delay));
+    }
+  }, [refresh]);
+
   async function runCommand(command: AgentCommand) {
     setPendingCommand(command);
     try {
       const { delivered } = await api.sendCommand(id, command);
       if (delivered) toast.success(`${command} command sent`);
       else toast.error("Agent is offline");
+      refreshAfterAgentAction();
     } catch (error) {
       toast.error((error as Error).message);
     } finally {
@@ -221,6 +236,7 @@ export function InstanceDetail() {
           certificate={instance.certificate}
           online={instance.status === "online"}
           canEdit={isAdmin}
+          onAgentAction={refreshAfterAgentAction}
         />
         <TabsContent value="client">
           <ClientConfig config={instance.config} publicIp={instance.publicIp} />
@@ -589,6 +605,7 @@ function ConfigEditor({
   certificate,
   online,
   canEdit,
+  onAgentAction,
 }: {
   id: string;
   initial: RatholeConfig;
@@ -597,6 +614,8 @@ function ConfigEditor({
   certificate?: CertificateStatus;
   online: boolean;
   canEdit: boolean;
+  /** Pull fresh instance state after something the agent has to act on. */
+  onAgentAction: () => void;
 }) {
   const [config, setConfig] = useState<RatholeConfig>(() => normalizeConfig(structuredClone(initial)));
   const [saving, setSaving] = useState(false);
@@ -612,6 +631,7 @@ function ConfigEditor({
       } else {
         toast.error("Agent is offline");
       }
+      onAgentAction();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -756,6 +776,7 @@ function ConfigEditor({
     try {
       await api.updateInstance(id, { config: normalizeConfig(config) });
       toast.success("Configuration saved & pushed to agent");
+      onAgentAction();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {

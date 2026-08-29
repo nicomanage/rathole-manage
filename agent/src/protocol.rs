@@ -119,7 +119,7 @@ pub struct ServiceRef {
     pub bind_addr: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessState {
     Running,

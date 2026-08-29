@@ -19,6 +19,7 @@ mod runner;
 mod sysstat;
 mod tui;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +31,10 @@ use tracing_subscriber::prelude::*;
 use url::Url;
 
 use logcap::ChannelMakeWriter;
-use protocol::{AgentCommand, AgentToHub, HubToAgent, Metrics};
+use protocol::{
+    AgentCommand, AgentToHub, CertificateState, CertificateStatus, HubToAgent, Metrics,
+    ProcessState,
+};
 use runner::Runner;
 
 const RATHOLE_VERSION: &str = "0.5.0"; // matches the pinned rathole dependency
@@ -155,11 +159,13 @@ fn resolve_run_config() -> Result<RunConfig> {
     )
 }
 
-/// How often the agent reports status/metrics to the hub.
+/// How often the agent sends an unconditional status/metrics heartbeat.
 ///
 /// Reports are sent to the Worker HTTP endpoint and persisted in D1 without
 /// waking the control Durable Object. Values below 5s are ignored; the panel
 /// treats an agent as offline after three missed reports at the default cadence.
+///
+/// This is only the *upper* bound between reports — see [`CHANGE_POLL_INTERVAL`].
 fn status_interval() -> Duration {
     let secs = std::env::var("STATUS_INTERVAL_SECS")
         .ok()
@@ -167,6 +173,61 @@ fn status_interval() -> Duration {
         .filter(|&s| s >= 5)
         .unwrap_or(60);
     Duration::from_secs(secs)
+}
+
+/// How often the reporting loop samples the runner looking for a change worth
+/// reporting ahead of the next heartbeat.
+///
+/// Sampling is in-process and cheap (a join-handle check plus two reads of
+/// rathole's in-memory maps); only an actual change costs an HTTP request, so
+/// this cadence does not multiply the write load on D1.
+const CHANGE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The parts of a status report that describe node state rather than a sample.
+///
+/// Metrics, traffic and the certificate's `checked_at` are deliberately left
+/// out: they move on every observation, and including them would make every
+/// poll look like a change and turn [`CHANGE_POLL_INTERVAL`] into the report
+/// cadence.
+#[derive(PartialEq)]
+struct StatusFingerprint {
+    process_state: ProcessState,
+    service_status: Option<HashMap<String, bool>>,
+    certificate: Option<CertificateFingerprint>,
+    error: Option<String>,
+}
+
+/// [`CertificateStatus`] minus `checked_at`, which advances on every freshness
+/// check without anything about the certificate having changed.
+#[derive(PartialEq)]
+struct CertificateFingerprint {
+    domains: Vec<String>,
+    staging: bool,
+    state: CertificateState,
+    not_after: Option<u64>,
+    error: Option<String>,
+}
+
+impl StatusFingerprint {
+    fn new(
+        process_state: ProcessState,
+        service_status: &Option<HashMap<String, bool>>,
+        certificate: &Option<CertificateStatus>,
+        error: &Option<String>,
+    ) -> Self {
+        Self {
+            process_state,
+            service_status: service_status.clone(),
+            certificate: certificate.as_ref().map(|cert| CertificateFingerprint {
+                domains: cert.domains.clone(),
+                staging: cert.staging,
+                state: cert.state,
+                not_after: cert.not_after,
+                error: cert.error.clone(),
+            }),
+            error: error.clone(),
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -283,21 +344,36 @@ async fn run_daemon() -> Result<()> {
         });
     }
 
-    // Periodic status + metrics + per-service online state. Reports go to the
-    // stateless Worker endpoint and D1, never through the control WebSocket/DO.
+    // Status + metrics + per-service online state. Reports go to the stateless
+    // Worker endpoint and D1, never through the control WebSocket/DO.
+    //
+    // A heartbeat goes out every `status_interval()` regardless, but between
+    // heartbeats the loop samples the runner every `CHANGE_POLL_INTERVAL` and
+    // reports the moment the state the panel renders actually changes — a
+    // service dropping its control channel, a certificate failing, rathole
+    // dying — instead of leaving the panel a full interval behind. Hub messages
+    // that change state on purpose nudge the loop through `report_now`.
+    let (report_now_tx, mut report_now_rx) = mpsc::unbounded_channel::<()>();
     {
         let cfg = cfg.clone();
         let runner = runner.clone();
+        // Hold a sender here so `recv()` can never resolve to `None` (which
+        // would make the select below spin) if every other clone is dropped.
+        let _report_now_tx = report_now_tx.clone();
         tokio::spawn(async move {
             let mut collector = sysstat::MetricsCollector::new();
             let hostname = sysstat::hostname();
             let interval = status_interval();
-            let mut ticker =
-                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            let poll = interval.min(CHANGE_POLL_INTERVAL);
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
             // Skip missed ticks rather than firing a catch-up burst of reports.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_report: Option<tokio::time::Instant> = None;
+            let mut last_fingerprint: Option<StatusFingerprint> = None;
+            // The first pass reports unconditionally: versions, hostname and
+            // uptime belong on the panel at startup, not one heartbeat later.
+            let mut forced = true;
             loop {
-                ticker.tick().await;
                 let mut guard = runner.lock().await;
                 guard.refresh().await;
                 let state = guard.state();
@@ -306,24 +382,37 @@ async fn run_daemon() -> Result<()> {
                 let certificate = guard.certificate_status();
                 let error = guard.last_error();
                 drop(guard);
-                let metrics = Metrics {
-                    cpu_percent: collector.cpu_percent(),
-                    memory_mb: collector.memory_mb(),
-                    uptime_seconds: Some(collector.uptime_seconds()),
-                    rathole_version: Some(RATHOLE_VERSION.into()),
-                    agent_version: Some(env!("CARGO_PKG_VERSION").into()),
-                    hostname: hostname.clone(),
-                    config_in_sync: None,
-                };
-                let msg = AgentToHub::Status {
-                    process_state: state,
-                    metrics: Some(metrics),
-                    service_status: statuses,
-                    traffic,
-                    certificate: certificate.map(Box::new),
-                    error,
-                };
-                spawn_status_report(cfg.clone(), msg);
+
+                let fingerprint = StatusFingerprint::new(state, &statuses, &certificate, &error);
+                let heartbeat_due = last_report.is_none_or(|at| at.elapsed() >= interval);
+                if forced || heartbeat_due || last_fingerprint.as_ref() != Some(&fingerprint) {
+                    let metrics = Metrics {
+                        cpu_percent: collector.cpu_percent(),
+                        memory_mb: collector.memory_mb(),
+                        uptime_seconds: Some(collector.uptime_seconds()),
+                        rathole_version: Some(RATHOLE_VERSION.into()),
+                        agent_version: Some(env!("CARGO_PKG_VERSION").into()),
+                        hostname: hostname.clone(),
+                        config_in_sync: None,
+                    };
+                    let msg = AgentToHub::Status {
+                        process_state: state,
+                        metrics: Some(metrics),
+                        service_status: statuses,
+                        traffic,
+                        certificate: certificate.map(Box::new),
+                        error,
+                    };
+                    spawn_status_report(cfg.clone(), msg);
+                    last_report = Some(tokio::time::Instant::now());
+                    last_fingerprint = Some(fingerprint);
+                }
+                forced = false;
+
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = report_now_rx.recv() => forced = true,
+                }
             }
         });
     }
@@ -331,7 +420,7 @@ async fn run_daemon() -> Result<()> {
     // Connection loop with exponential backoff. rathole keeps running across drops.
     let mut backoff = 1u64;
     loop {
-        match connect_once(&cfg, &runner, &to_hub_tx, &mut to_hub_rx).await {
+        match connect_once(&cfg, &runner, &to_hub_tx, &mut to_hub_rx, &report_now_tx).await {
             Ok(()) => {
                 tracing::warn!("hub connection closed, reconnecting");
                 backoff = 1;
@@ -350,6 +439,7 @@ async fn connect_once(
     runner: &Arc<Mutex<Runner>>,
     to_hub_tx: &mpsc::UnboundedSender<String>,
     to_hub_rx: &mut mpsc::UnboundedReceiver<String>,
+    report_now_tx: &mpsc::UnboundedSender<()>,
 ) -> Result<()> {
     let ws_url = build_ws_url(cfg)?;
     tracing::info!("connecting to hub");
@@ -376,7 +466,7 @@ async fn connect_once(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        handle_hub_message(&text, cfg, runner, to_hub_tx).await;
+                        handle_hub_message(&text, runner, to_hub_tx, report_now_tx).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         write.send(Message::Pong(payload)).await?;
@@ -398,9 +488,9 @@ async fn connect_once(
 
 async fn handle_hub_message(
     text: &str,
-    cfg: &RunConfig,
     runner: &Arc<Mutex<Runner>>,
     to_hub_tx: &mpsc::UnboundedSender<String>,
+    report_now_tx: &mpsc::UnboundedSender<()>,
 ) {
     let msg: HubToAgent = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -415,25 +505,20 @@ async fn handle_hub_message(
             let _ = to_hub_tx.send(t);
         }
     };
+    // Ask the reporting loop for a snapshot right now, whether or not the state
+    // it last reported has changed.
+    let report_now = || {
+        let _ = report_now_tx.send(());
+    };
 
     match msg {
         HubToAgent::Registered { name, .. } => {
             tracing::info!(%name, "hub acknowledged registration");
-            // The WebSocket upgrade has already seeded the D1 credential. Send
-            // one snapshot immediately so a newly connected agent is not
-            // considered online merely because its control socket exists.
-            let mut guard = runner.lock().await;
-            guard.refresh().await;
-            let status = AgentToHub::Status {
-                process_state: guard.state(),
-                metrics: None,
-                service_status: guard.service_status(),
-                traffic: guard.traffic(),
-                certificate: guard.certificate_status().map(Box::new),
-                error: guard.last_error(),
-            };
-            drop(guard);
-            spawn_status_report(cfg.clone(), status);
+            // The WebSocket upgrade has already seeded the D1 credential and
+            // bumped `lastSeen`, so the panel discards any report older than the
+            // reconnect. Push a fresh snapshot or the node reads as online with
+            // stale state until the next heartbeat.
+            report_now();
         }
         HubToAgent::ApplyConfig {
             config,
@@ -467,6 +552,10 @@ async fn handle_hub_message(
                     });
                 }
             }
+            drop(guard);
+            // A new config changes the service set the panel renders, so report
+            // it now instead of leaving the old set on screen until a heartbeat.
+            report_now();
         }
         HubToAgent::Command { command } => {
             tracing::info!(?command, "executing command");
@@ -481,28 +570,13 @@ async fn handle_hub_message(
                 AgentCommand::Status => Ok(()),
                 AgentCommand::RenewCertificate => guard.renew_certificate().await,
             };
-            let state = guard.state();
-            let statuses = guard.service_status();
-            let traffic = guard.traffic();
-            let certificate = guard.certificate_status();
-            let error = guard.last_error();
             drop(guard);
             reply(AgentToHub::CommandResult {
                 command,
                 ok: result.is_ok(),
                 error: result.err().map(|e| format!("{e:#}")),
             });
-            spawn_status_report(
-                cfg.clone(),
-                AgentToHub::Status {
-                    process_state: state,
-                    metrics: None,
-                    service_status: statuses,
-                    traffic,
-                    certificate: certificate.map(Box::new),
-                    error,
-                },
-            );
+            report_now();
         }
         HubToAgent::Ping => reply(AgentToHub::Pong),
         HubToAgent::Error { message } => {
